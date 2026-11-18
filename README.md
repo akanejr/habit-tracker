@@ -1,130 +1,66 @@
-# Habit Tracker
+# Bloom — Habit Tracker
 
-A habit-tracking web app built with **Next.js 16 (App Router) + TypeScript**,
-backed by a hosted **Supabase** project (Postgres, Auth, REST).
+A Next.js App Router and Supabase application for building small, sustainable habits. Milestone 1 adds email/password authentication; habit management is a later milestone.
 
-> **Status:** project foundation only. Architecture, authentication plumbing,
-> and the database schema are in place. The habit-tracking interface is not
-> built yet — see [ARCHITECTURE.md](./ARCHITECTURE.md) for the design and
-> roadmap.
+## Run locally
 
-## Tech stack
-
-| Layer        | Technology                                              |
-| ------------ | ------------------------------------------------------- |
-| Framework    | Next.js 16 (App Router), React 19, TypeScript           |
-| Backend      | Supabase (Postgres 17, GoTrue Auth, PostgREST)          |
-| Hosting      | Vercel (primary target)                                 |
-| Supabase     | Project `Habit-Tracker` (`retkelaxegvlkuzhgosz`, eu-west-1) |
-
-## Quick start (local)
-
-Prerequisite: Node.js 22 (see `.nvmrc`).
+Use Node.js 22 (see `.nvmrc`).
 
 ```bash
 npm install
-cp .env.example .env.local   # then fill in your Supabase keys
-npm run dev                  # http://localhost:3000
+cp .env.example .env.local
+# Fill in the existing Supabase project's public URL and publishable key.
+npm run dev
 ```
 
-The home page shows a live Supabase connection check — green means the app
-can reach the hosted project and the schema is applied.
+The app runs at `http://localhost:3000`. The project uses the hosted Supabase service, including in development; it does not require an emulator or Arena infrastructure.
 
 ## Environment variables
 
-| Variable                      | Required | Where it goes | Notes                                                        |
-| ----------------------------- | -------- | ------------- | ------------------------------------------------------------ |
-| `NEXT_PUBLIC_SUPABASE_URL`    | Yes      | `.env.local` + Vercel | Project URL. Not secret.                            |
-| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Yes    | `.env.local` + Vercel | Publishable/anon key. Safe in browser; RLS enforces access. |
+| Variable | Required | Purpose |
+| --- | --- | --- |
+| `NEXT_PUBLIC_SUPABASE_URL` | Yes | Hosted Supabase project URL |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Yes | Supabase publishable/anon key |
 
-Get the project URL and publishable (or legacy anon) key from **Supabase Dashboard → Project Settings → API**. The `NEXT_PUBLIC_` values are intentionally public and embedded in browser code at build time; add them to Vercel before the build and redeploy after changing them. Do not use a service-role or secret key for either variable.
+Get the values from the existing Supabase project. These `NEXT_PUBLIC_` values are public and can be included in browser code. Set them in `.env.local` and in Vercel for each applicable environment **before building**; redeploy after changes. Never use a service-role or secret key here. `.env.local` and other real `.env*` files are Git-ignored; `.env.example` contains placeholders only.
 
-Security rules:
+## Authentication
 
-- `.env.local` is gitignored — real values are never committed.
-- Only `NEXT_PUBLIC_*` variables (the URL and publishable key) are ever sent
-  to the browser. No service-role key is used or required.
-- All data access goes through Row Level Security policies, so the anon key
-  alone cannot read other users' data.
+- `/` welcomes visitors; `/signup`, `/login`, `/resend-confirmation`, `/forgot-password` and `/reset-password` provide email/password and verification flows.
+- Signup supplies `display_name` as user metadata. The existing `handle_new_user` trigger creates the corresponding profile. Email confirmation is required by the current hosted Auth settings.
+- `/auth/callback` exchanges Supabase's one-time PKCE code for a session. For PKCE, open the email link in the **same browser and device** that initiated the request. Links can expire or be used only once.
+- `/dashboard` is a protected, minimal post-login landing page, not the future habits dashboard. A server-side Auth check protects it; signed-out visitors are sent to login. Logout ends the current session.
+- Authenticated data access uses the existing Supabase client and Row Level Security; no RLS or database privileges were changed for this milestone.
+
+### Auth URL and email setup
+
+Before real email verification or password recovery, an authorized operator must review **Supabase Dashboard → Authentication → URL Configuration**. Set the Site URL to the intended canonical application URL and allow the exact callback URL(s), including:
+
+- `https://habit-tracker-one-puce.vercel.app/auth/callback` (production confirmation)
+- `https://habit-tracker-one-puce.vercel.app/auth/callback?next=/reset-password` (production recovery)
+- `http://localhost:3000/auth/callback` and `http://localhost:3000/auth/callback?next=/reset-password` (local development, if used)
+- The specific preview origin's corresponding callback URLs if testing there.
+
+Supabase interprets `?` as a single-character wildcard in allow-list patterns; verify both actual callback URLs using its redirect URL tester. Only allow domains you control. These settings are not modified by the app.
+
+The built-in Supabase email sender is intended for testing and, without custom SMTP, restricts recipients and has low rate limits. Configure production SMTP and review email delivery settings before onboarding users. Do not change Auth settings or templates without the project owner's approval.
 
 ## Project structure
 
-```
-habit-tracker/
-├── app/                        # Next.js App Router pages & routes
-│   ├── layout.tsx              # Root layout + metadata
-│   ├── page.tsx                # Foundation status page (connection check)
-│   ├── globals.css             # Global styles (no external assets)
-│   ├── icon.svg                # App icon
-│   └── auth/
-│       ├── callback/route.ts   # Exchanges auth codes for sessions
-│       └── auth-error/page.tsx # Auth failure placeholder
-├── lib/
-│   ├── env.ts                  # Typed env access + "configured?" check
-│   └── supabase/
-│       ├── client.ts           # Browser client (Client Components)
-│       ├── server.ts           # Server client (Server Components/Actions)
-│       └── middleware.ts       # Session refresh logic
-├── types/
-│   └── database.ts             # Database types (match the SQL schema)
-├── supabase/
-│   └── migrations/             # SQL migrations (source of truth)
-├── proxy.ts                    # Runs session refresh on every request
-├── vercel.json                 # Vercel project config
-├── .env.example                # Documented env template (safe to commit)
-└── ARCHITECTURE.md             # System design & roadmap
-```
+- `app/`: welcome, auth routes, PKCE callback and protected post-login landing.
+- `components/`: shared branding and auth UI.
+- `lib/supabase/`: browser/server clients and request-time session refresh.
+- `proxy.ts`: session refresh entry point.
+- `types/database.ts`: database types.
+- `supabase/migrations/`: recorded schema and approved privilege-hardening SQL. These migrations are already applied to the existing hosted project; do not re-run them without reviewing the target and migration history.
+- `ARCHITECTURE.md`: architecture and session/security notes.
 
-## Database
-
-The initial schema (`supabase/migrations/20261117120210_initial_schema.sql`)
-creates `profiles`, `habits`, and `habit_logs` with Row Level Security
-policies so every user can only access their own rows, plus a trigger that
-auto-creates a profile on sign-up.
-
-Both the initial schema and `20261117133259_gate_2_privilege_hardening.sql` are already applied to the connected hosted project and recorded in its migration history. The latter is included here to keep the repository aligned; copying or committing it does not execute it. When using the Supabase CLI, review the target project and migration history before running any database commands. For a separately authorized target (install and configure the CLI first):
+## Checks and deployment
 
 ```bash
-supabase link --project-ref <target-project-ref>
-supabase db push
+npm run typecheck
+npm run lint
+npm run build
 ```
 
-## Deploying to Vercel
-
-1. Push this repo to GitHub.
-2. In Vercel: **Add New → Project → Import** the GitHub repo.
-   - Framework preset: **Next.js** (auto-detected; `vercel.json` confirms it).
-   - Root directory: `./` (repo root).
-   - Node.js: **22.x** (also declared in `package.json` and `.nvmrc`).
-   - Build command: `npm run build` (default); keep the default output settings.
-3. Add the environment variables from the table above in
-   **Settings → Environment Variables** (Production + Preview).
-4. Deploy.
-
-### After the first deploy — Supabase auth URLs
-
-The configured **Site URL** is the fallback for Supabase auth redirects. Update it in **Supabase Dashboard → Authentication → URL
-Configuration**:
-
-- **Site URL:** your Vercel URL (e.g. `https://habit-tracker.vercel.app`)
-- **Redirect URLs:** add `https://<your-domain>/auth/callback` and keep
-  `http://localhost:3000/auth/callback` for local development.
-
-## Scripts
-
-| Command            | Purpose                              |
-| ------------------ | ------------------------------------ |
-| `npm run dev`      | Start dev server on `0.0.0.0:3000`   |
-| `npm run build`    | Production build                     |
-| `npm run start`    | Run the production build locally     |
-| `npm run lint`     | ESLint                               |
-| `npm run typecheck`| TypeScript check without emitting    |
-
-## Roadmap
-
-1. Sign-in / sign-up UI (email + password).
-2. Habit CRUD (create, edit, archive habits).
-3. Daily check-in (mark habits complete, streaks).
-4. Statistics and polish.
-
-**Testing limits:** The hosted database connection is checked via a public, RLS-protected read. Authentication UI and end-to-end sign-up, sign-in, email confirmation, and authenticated CRUD testing are still pending. For PKCE email links, configure Supabase email templates and redirect URLs to use the callback when the sign-in flow is implemented; confirmation behavior depends on the chosen flow and browser. Vercel preview URLs must also be added to the Supabase redirect allow list when auth is tested there.
+Import the existing GitHub repository into Vercel, use the Next.js preset and Node.js 22, and configure the two public variables. Deployments require a separate commit/push and any requested approval. A successful build is not a substitute for testing the full email, sign-in, recovery, session-refresh and logout flows against hosted Supabase.

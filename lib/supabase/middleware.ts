@@ -2,44 +2,31 @@ import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 import { isSupabaseConfigured } from "@/lib/env";
 
-/**
- * Refreshes the Supabase auth session on every request so Server
- * Components always see a valid session. Invoked from /proxy.ts.
- *
- * If Supabase env vars are not configured yet, requests pass through
- * untouched so the app can still boot and show setup instructions.
- */
+/** Refresh auth cookies before rendering. Never cache session-bearing responses. */
 export async function updateSession(request: NextRequest) {
-  if (!isSupabaseConfigured) {
-    return NextResponse.next({ request });
-  }
-
-  let supabaseResponse = NextResponse.next({ request });
+  let response = NextResponse.next({ request });
+  response.headers.set("Cache-Control", "private, no-store, max-age=0");
+  if (!isSupabaseConfigured) return response;
 
   const supabase = createServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
     {
       cookies: {
-        getAll() {
-          return request.cookies.getAll();
-        },
-        setAll(cookiesToSet) {
-          cookiesToSet.forEach(({ name, value }) =>
-            request.cookies.set(name, value)
-          );
-          supabaseResponse = NextResponse.next({ request });
-          cookiesToSet.forEach(({ name, value, options }) =>
-            supabaseResponse.cookies.set(name, value, options)
-          );
+        getAll() { return request.cookies.getAll(); },
+        setAll(cookiesToSet, cacheHeaders) {
+          cookiesToSet.forEach(({ name, value }) => request.cookies.set(name, value));
+          const previous = response;
+          response = NextResponse.next({ request });
+          previous.cookies.getAll().forEach(cookie => response.cookies.set(cookie));
+          cookiesToSet.forEach(({ name, value, options }) => response.cookies.set(name, value, options));
+          Object.entries(cacheHeaders).forEach(([name, value]) => response.headers.set(name, value));
+          response.headers.set("Cache-Control", "private, no-store, max-age=0");
         },
       },
     }
   );
-
-  // Refresh the session if it has expired. getUser() validates the token
-  // against the Auth server — never trust getSession() for authorization.
+  // Ask the auth server to validate the user and refresh the session if necessary.
   await supabase.auth.getUser();
-
-  return supabaseResponse;
+  return response;
 }
