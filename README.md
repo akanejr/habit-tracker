@@ -1,6 +1,6 @@
 # Bloom — Habit Tracker
 
-A Next.js App Router and Supabase application for building small, sustainable habits. Milestone 1 adds email/password authentication; habit management is a later milestone.
+A Next.js App Router and Supabase application for building small, sustainable habits. It includes email/password authentication and a Today dashboard with basic habit management. Progress and Settings are placeholders.
 
 ## Run locally
 
@@ -29,8 +29,8 @@ Get the values from the existing Supabase project. These `NEXT_PUBLIC_` values a
 - `/` welcomes visitors; `/signup`, `/login`, `/resend-confirmation`, `/forgot-password` and `/reset-password` provide email/password and verification flows.
 - Signup supplies `display_name` as user metadata. The existing `handle_new_user` trigger creates the corresponding profile. Email confirmation is required by the current hosted Auth settings.
 - `/auth/callback` exchanges Supabase's one-time PKCE code for a session. For PKCE, open the email link in the **same browser and device** that initiated the request. Links can expire or be used only once.
-- `/dashboard` is a protected, minimal post-login landing page, not the future habits dashboard. A server-side Auth check protects it; signed-out visitors are sent to login. Logout ends the current session.
-- Authenticated data access uses the existing Supabase client and Row Level Security; no RLS or database privileges were changed for this milestone.
+- `/dashboard` is the protected Today dashboard. A server-side Auth check protects it; signed-out visitors are sent to login. Logout ends the current session.
+- Authenticated data access uses the existing Supabase client and Row Level Security. Existing table policies and privileges are unchanged.
 
 ### Auth URL and email setup
 
@@ -45,10 +45,17 @@ Supabase interprets `?` as a single-character wildcard in allow-list patterns; v
 
 The built-in Supabase email sender is intended for testing and, without custom SMTP, restricts recipients and has low rate limits. Configure production SMTP and review email delivery settings before onboarding users. Do not change Auth settings or templates without the project owner's approval.
 
+## Today and habit management
+
+Create, edit, archive, complete, or undo a completion without reloading. The dashboard uses `Africa/Lagos` for its date, and the week runs Monday through Sunday. Daily habits appear every day; weekly habits appear until their target is met, while a habit completed today remains visible for undo. A weekly target counts the habit's completions in the current week even if its current frequency or target was edited during that week. An empty day shows 0%, not a completed day. Preferred time is informational and does not send a reminder.
+
+The UI prevents an extra completion when the weekly target has been reached, but that weekly limit is not enforced atomically by the database; simultaneous clients or direct API calls could exceed it. The existing unique constraint enforces at most one completion per habit and date. Archiving updates `is_active` and never deletes the habit or its logs. The approved history trigger stores metadata versions; it cannot reconstruct settings from before its baseline.
+
 ## Project structure
 
-- `app/`: welcome, auth routes, PKCE callback and protected post-login landing.
-- `components/`: shared branding and auth UI.
+- `app/`: welcome, auth routes, PKCE callback and protected Today dashboard.
+- `components/`: shared branding, auth UI, and habit management.
+- `lib/habits/`: Lagos dates and daily/weekly progress calculations.
 - `lib/supabase/`: browser/server clients and request-time session refresh.
 - `proxy.ts`: session refresh entry point.
 - `types/database.ts`: database types.
