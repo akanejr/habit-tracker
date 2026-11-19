@@ -2,6 +2,10 @@
 
 This branch is NOT a release and is not ready for final independent review. Do not run migrations or release it on a hosted project. This document is a progress record, not a complete implementation plan or production runbook.
 
+## Previous foundation checkpoint
+
+For the subsequent local database and UI milestone, see `docs/bloom-local-testing.md`. The statements below describe the earlier checkpoint, not the current branch.
+
 ## Implemented foundation
 
 `lib/sessions/core.ts` provides pure display/reporting calculations for a proposed session representation: Lagos-week goal selection, weekly session counts and separate active-day counts, measured versus estimated duration totals, unknown durations, distinct-habit daily progress, and timer-display interpolation. A timer display is not authoritative and must never be used to calculate persisted completion duration. Its data shape is provisional and is not connected to the dashboard or a database API. An unresolved goal schedule produces an error instead of silently choosing a potentially incorrect historical goal.
