@@ -12,7 +12,7 @@ page.on('console',message=>{ if(message.type()==='error') console.error('CONSOLE
 const uid='00000000-0000-4000-8000-000000000001', hid='10000000-0000-4000-8000-000000000001';
 let habits=[{id:hid,user_id:uid,name:'Read',description:'A quiet moment',frequency:'daily',target_per_week:null,preferred_time:null,color:null,icon:null,is_active:true,created_at:new Date().toISOString(),updated_at:new Date().toISOString()}];
 let sessions=[], segments=[], versions=[];
-const ledger=new Map(); let dropped=false;
+const ledger=new Map(); let dropped=false, maintenance=true;
 const today=new Intl.DateTimeFormat('en-CA',{timeZone:'Africa/Lagos',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
 const reply = (route,status,body) => route.fulfill({status,headers:{'access-control-allow-origin':'*','access-control-allow-headers':'*','access-control-allow-methods':'GET,POST,OPTIONS','content-type':'application/json'},body:JSON.stringify(body)});
 await page.route('http://127.0.0.1:54321/**',async route=>{
@@ -26,6 +26,7 @@ await page.route('http://127.0.0.1:54321/**',async route=>{
   }
   const p=request.postDataJSON(), key=p.p_request_id;
   if(ledger.has(key)) return reply(route,200,ledger.get(key));
+  if(path==='bloom_start_session' && maintenance) { maintenance=false; return reply(route,400,{code:'55000',message:'Bloom writes are temporarily frozen'}); }
   if(path==='bloom_start_session') {
     const id=crypto.randomUUID(), start=new Date(Date.now()-5*3600_000).toISOString();
     sessions.push({id,user_id:uid,habit_id:p.p_habit_id,source:'timed',status:'running',created_at:start,started_at:start,completed_at:null,completed_on:null,duration_ms:null,estimated_ms:null,note:null});
@@ -55,7 +56,8 @@ try {
   await context.setOffline(true); await waitText('offline');
   assert.equal(await page.getByRole('button',{name:'Start timer'}).isDisabled(),true);
   await context.setOffline(false);
-  await page.getByRole('button',{name:'Start timer'}).click(); await waitText('YOUR TIMER');
+  await page.getByRole('button',{name:'Start timer'}).click(); await waitText('Maintenance or a pending dependency');
+  await page.getByRole('button',{name:'Retry safely'}).click(); await waitText('YOUR TIMER');
   await waitText('four hours or more');
   await page.reload(); await waitText('four hours or more');
   await page.getByRole('button',{name:'Pause',exact:true}).click(); await waitText('PAUSED');
@@ -71,11 +73,11 @@ try {
   await page.getByRole('button',{name:'Details',exact:true}).click(); await waitText('Mock quick entry');
   await page.getByRole('button',{name:'Archive',exact:true}).click(); await page.getByRole('button',{name:'Yes, archive'}).click();
   await waitText('archived'); await page.getByRole('button',{name:'Complete',exact:true}).click();
-  await page.getByRole('button',{name:'Progress',exact:true}).click(); await waitText('2 sessions · 1 active days');
+  await page.getByRole('button',{name:'Progress',exact:true}).click(); await waitText('2 sessions · 1 active day');
   await waitText('Estimated: 0:12:00');
   await page.getByRole('button',{name:'Settings',exact:true}).click(); await waitText('Self-service deletion is not available');
   assert.equal(await page.getByRole('button',{name:'Delete account unavailable'}).isDisabled(),true);
   const overflow=await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth);
   assert.equal(overflow,false,'mobile viewport should not overflow horizontally');
-  console.log('PASS mocked browser: mobile/dark, automated accessibility scan, offline, start, four-hour warning, reload persistence, pause/resume, Quick Log during timer, uncertain retry, history, archive then complete, Progress, disabled deletion, no horizontal overflow');
+  console.log('PASS mocked browser: mobile/dark, automated accessibility scan, offline, maintenance and retry, start, four-hour warning, reload persistence, pause/resume, Quick Log during timer, uncertain retry, history, archive then complete, Progress, disabled deletion, no horizontal overflow');
 } catch (error) { console.error('PAGE:', await page.locator('body').innerText().catch(() => 'unavailable')); throw error; } finally { await browser.close(); }

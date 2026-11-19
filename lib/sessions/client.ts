@@ -10,12 +10,14 @@ export type Command =
   | { kind: "habit_create"; request: string; name: string; description: string | null; time: string | null }
   | { kind: "habit_update"; request: string; habit: string; name: string; description: string | null; time: string | null }
   | { kind: "habit_archive"; request: string; habit: string }
+  | { kind: "goal"; request: string; habit: string; target: number | null }
   | { kind: "start"; request: string; habit: string }
   | { kind: "quick"; request: string; habit: string; date: string; estimatedMs: number | null; note: string | null }
   | { kind: "pause" | "resume" | "complete" | "cancel"; request: string; session: string };
 
 /** The request ID and exact payload must be retained until an uncertain response is resolved. */
 export async function executeCommand(client: Client, command: Command) {
+  if (command.kind === "goal") throw new Error("Goal scheduling is not available in this local database adapter");
   const result = command.kind === "habit_create"
     ? await client.rpc("bloom_create_habit", { p_request_id: command.request, p_name: command.name, p_description: command.description, p_time: command.time })
     : command.kind === "habit_update"
