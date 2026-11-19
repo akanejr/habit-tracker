@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { updateSession } from "@/lib/supabase/middleware";
+import { isPhaseOneSimulation } from "@/lib/phase1-mode";
 
 /**
  * Request proxy (Next.js 16 convention, formerly middleware.ts).
@@ -7,7 +8,7 @@ import { updateSession } from "@/lib/supabase/middleware";
  */
 export default async function proxy(request: NextRequest) {
   // The opt-in synthetic UX sandbox must not contact hosted Auth.
-  if (request.nextUrl.pathname === "/bloom-phase1" && process.env.BLOOM_PHASE1_DEMO === "1") {
+  if ((request.nextUrl.pathname === "/dashboard" || request.nextUrl.pathname === "/bloom-phase1") && isPhaseOneSimulation()) {
     const response = NextResponse.next(); response.headers.set("Cache-Control", "private, no-store"); return response;
   }
   return await updateSession(request);

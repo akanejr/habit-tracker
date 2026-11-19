@@ -65,7 +65,7 @@ try {
   await page.getByRole('button',{name:'Quick Log',exact:true}).click();
   await page.getByLabel('Estimated minutes (optional)').fill('12');
   await page.getByLabel('Note (optional)').fill('Mock quick entry');
-  await page.getByRole('button',{name:'Save session'}).click(); await waitText('Action needs confirmation');
+  await page.getByRole('button',{name:'Save session'}).click(); await waitText('Action needs confirmation'); assert.equal(await page.getByLabel('Note (optional)').isDisabled(),true);
   const before=sessions.filter(s=>s.source==='quick').length;
   await page.reload(); await waitText('Action needs confirmation');
   await page.getByRole('button',{name:'Retry safely'}).click(); await waitText('1 session today');

@@ -2,7 +2,7 @@
 import { chromium } from 'playwright';
 import AxeBuilder from '@axe-core/playwright';
 import assert from 'node:assert/strict';
-const base='http://127.0.0.1:3103/bloom-phase1';
+const base='http://127.0.0.1:3103/dashboard';
 const browser=await chromium.launch({headless:true,args:['--no-sandbox']});
 async function suite(viewport, colorScheme) {
  const context=await browser.newContext({viewport,colorScheme});
@@ -11,30 +11,30 @@ async function suite(viewport, colorScheme) {
  const external=[];page.on('request',r=>{if(new URL(r.url()).origin!=='http://127.0.0.1:3103') external.push(r.url());});
  const button=(name)=>page.getByRole('button',{name,exact:true});
  try {
-  await page.goto(base); await page.getByText('Simulation only.').waitFor();
+  await page.goto('http://127.0.0.1:3103/'); await page.getByRole('link',{name:'Explore simulated Bloom'}).click(); await page.getByText('Simulation only.').waitFor(); assert.equal(new URL(page.url()).pathname, '/dashboard');
   await page.getByText('No active habits yet.').waitFor();
   const axe=await new AxeBuilder({page}).analyze(); assert.deepEqual(axe.violations.map(v=>v.id),[],'automated axe audit');
   await button('Add a habit').click();
   await page.getByLabel('Name',{exact:true}).fill('Read');
   await page.getByLabel('Description').fill('Quiet time');
   await button('Save habit').click(); await page.getByText('0 sessions today').waitFor();
-  await button('Details').click(); await button('Set weekly session goal').click();
+  await button('Details').click(); assert.ok(new URL(page.url()).searchParams.get('habit')); await page.reload(); await button('Close details').waitFor(); await button('Set weekly session goal').click();
   await page.getByLabel('Sessions per week').fill('12'); await button('Confirm goal').click();
   await page.getByText('12 sessions per week',{exact:false}).first().waitFor();
   await button('Close details').click();
   await button('Start timer').click(); await page.getByText('YOUR TIMER · RUNNING').waitFor();
-  await button('Progress').click(); await page.getByText('YOUR TIMER · RUNNING').waitFor(); await button('Today').click();
+  await button('Progress').click(); await page.getByText('YOUR TIMER · RUNNING').waitFor(); assert.equal(new URL(page.url()).searchParams.get('view'),'progress'); await page.goBack(); await page.getByRole('heading',{name:'Today’s habits'}).waitFor(); await page.goForward(); await page.getByRole('heading',{name:'Progress'}).waitFor(); await button('Today').click();
   await context.setOffline(true); await page.getByText('still running until a pause is confirmed',{exact:false}).waitFor(); assert.equal(await button('Pause').isDisabled(),true);
   await context.setOffline(false); await button('Pause').click(); await page.getByText('YOUR TIMER · PAUSED').waitFor();
   await page.reload(); await page.getByText('YOUR TIMER · PAUSED').waitFor();
   await button('Resume').click(); await page.getByText('YOUR TIMER · RUNNING').waitFor();
-  await button('Quick Log').click(); await page.getByLabel('Lagos completion date').fill('9999-12-31'); assert.equal(await page.getByLabel('Lagos completion date').evaluate(el=>el.validity.rangeOverflow),true); await page.getByLabel('Lagos completion date').fill('2026-01-02'); await page.getByLabel('Estimated minutes (optional)').fill('12'); await page.getByLabel('Note (optional)').fill('A past session'); await button('Save session').click();
+  await button('Quick Log').click(); await page.getByLabel('Note (optional)').fill('Do not lose me'); await button('Pause').click(); assert.equal(await page.getByLabel('Note (optional)').inputValue(),'Do not lose me'); await button('Resume').click(); await page.getByLabel('Lagos completion date').fill('9999-12-31'); assert.equal(await page.getByLabel('Lagos completion date').evaluate(el=>el.validity.rangeOverflow),true); await page.getByLabel('Lagos completion date').fill('2026-01-02'); await page.getByLabel('Estimated minutes (optional)').fill('12'); await page.getByLabel('Note (optional)').fill('A past session'); await button('Save session').click();
   await button('Details').click(); await page.getByText('A past session').waitFor(); await page.getByText(/^Recorded /).waitFor();
   await button('Edit').click(); await page.getByLabel('Name',{exact:true}).fill('Read deeply'); await button('Save habit').click(); await page.getByText('known name: Read',{exact:false}).waitFor();
   await button('Set weekly session goal').click(); await page.getByLabel('No weekly target').check(); await button('Confirm goal').click(); await page.getByText('Scheduled from ',{exact:false}).filter({hasText:'No weekly target'}).waitFor();
   await button('Archive').click(); await button('Yes, archive').click(); await page.getByText('archived',{exact:false}).first().waitFor();
   await button('Complete').click(); await button('Progress').click(); await page.getByText('Weekly goal not confirmed',{exact:true}).waitFor(); await page.getByText('1 session · 1 active day',{exact:true}).waitFor();
-  await button('Settings').click(); await page.getByLabel('Display name').fill('Tola'); await button('Save profile').click(); await page.getByText('Simulated profile saved',{exact:false}).waitFor(); await page.getByLabel('Theme').selectOption('dark'); await page.reload(); assert.equal(await page.getByLabel('Theme').count(),0); await button('Settings').click(); assert.equal(await page.getByLabel('Theme').inputValue(),'dark'); assert.equal(await page.getByLabel('Display name').inputValue(),'Tola');
+  await button('Settings').click(); await page.getByLabel('Display name').fill('Tola'); await button('Save profile').click(); await page.getByText('Simulated profile saved',{exact:false}).waitFor(); await page.getByLabel('Theme').selectOption('dark'); await page.reload(); await page.getByLabel('Theme').waitFor(); assert.equal(await page.getByLabel('Theme').inputValue(),'dark'); assert.equal(await page.getByLabel('Display name').inputValue(),'Tola');
   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false,'horizontal overflow');
   assert.deepEqual(external,[],'no network calls outside local app'); assert.deepEqual(errors,[],'no page errors');
   console.log(`PASS ${viewport.width}px ${colorScheme}: synthetic goal, lifecycle, offline, persistence, backdate, history, archive, reporting, theme, axe, no external calls`);
