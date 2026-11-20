@@ -1,0 +1,797 @@
+From 6b0a30ba35d5baecfc0d0a9fdebc807d84d25d41 Mon Sep 17 00:00:00 2001
+From: Akaninyene Ekpenyong <106785283+akanejr@users.noreply.github.com>
+Date: Fri, 20 Nov 2026 07:38:08 +0000
+Subject: [PATCH] Add interactive Today cards, Habit Details screen, shared
+ timer across views
+
+- Today habit cards are now tappable to open a dedicated Details screen
+- Details includes weekly goal/progress, session counts, measured time,
+  dated session history, and the same shared timer and controls
+- Card and Details layouts include keyboard focus, responsive styling,
+  theme support, and reduced-motion handling
+- Singular/plural wording for weekly session goals and progress labels
+- Updated browser test suites for new UI copy and navigation flows
+- Updated Phase 1 checkpoint with verification evidence
+---
+ app/globals.css                            |  76 ++++++
+ components/sessions/sessions-workspace.tsx | 255 +++++++++++++++++++--
+ docs/phase1-ui-checkpoint.md               | 101 ++++++--
+ tests/phase1-demo.browser.mjs              |  68 ++++--
+ tests/phase1-navigation.browser.mjs        |  31 ++-
+ tests/session-core.test.mjs                |   2 +-
+ tests/session-ui.mock.mjs                  |   7 +-
+ 7 files changed, 483 insertions(+), 57 deletions(-)
+
+diff --git a/app/globals.css b/app/globals.css
+index 96868cb..a85be5d 100644
+--- a/app/globals.css
++++ b/app/globals.css
+@@ -38,3 +38,79 @@ html{min-height:100%}body{margin:0;background:var(--cream);color:var(--ink);font
+ @media(max-width:600px){.bloom-habit-card{align-items:stretch}.bloom-habit-card>.bloom-actions{width:100%}.bloom-nav{padding-top:6px;padding-bottom:max(6px,env(safe-area-inset-bottom))}}
+ 
+ .bloom-main .bloom-report-habit{font:700 16px/1.3 var(--sans);letter-spacing:0;margin:0 0 8px}
++
++/* One shared active session is placed inline on its Today card, and in the shared panel on other views. */
++.bloom-habit-card.bloom-habit-card-active{align-items:stretch;flex-direction:column}
++.bloom-habit-card-active>.bloom-habit-heading,.bloom-habit-card-active>.bloom-habit-actions{width:100%}
++.bloom-habit-card-active>.bloom-habit-actions{justify-content:flex-start}
++.bloom-card-timer{width:100%;padding:15px;background:#edf3e9;color:var(--text);border-color:var(--line);border-radius:9px}
++.bloom-timer-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:18px}
++.bloom-timer-copy{min-width:0}
++.bloom-timer-copy>.bloom-kicker{margin:0 0 7px}
++.bloom-timer-copy h2{margin:0 0 7px}
++.bloom-timer-state{display:flex;align-items:center;gap:8px;margin:0 0 7px!important;font-size:14px!important;font-weight:700;color:inherit!important}
++.bloom-timer-indicator{display:inline-block;width:9px;height:9px;flex:none;border-radius:50%;background:#8ecb8e}
++.bloom-timer-state.is-running .bloom-timer-indicator{animation:bloom-active-pulse 2s ease-in-out infinite}
++.bloom-timer-state.is-paused .bloom-timer-indicator{background:#c7ab65}
++@keyframes bloom-active-pulse{0%,100%{opacity:.72;transform:scale(.92)}50%{opacity:1;transform:scale(1)}}
++.bloom-timer .bloom-clock{margin:0!important;white-space:nowrap;font-size:clamp(30px,5vw,42px)!important;font-variant-numeric:tabular-nums}
++.bloom-timer-note{margin:7px 0 0!important;font-size:12px!important}
++.bloom-card-timer .bloom-timer-note{color:var(--muted)}
++.bloom-timer-actions{margin-top:12px}
++.bloom-timer-actions button{min-width:0}
++.bloom-timer:not(.bloom-card-timer) .bloom-timer-actions .bloom-primary{background:#d4e5bf;color:#203d2a;border-color:#d4e5bf}
++.bloom-timer .bloom-timer-actions .bloom-timer-cancel{background:transparent;border-color:#8da18e;color:inherit}
++.bloom-card-timer .bloom-kicker,.bloom-card-timer .bloom-timer-state{color:#315640!important}
++.bloom-card-timer .bloom-warning{background:#fbefd6;color:#5e4618}
++.bloom-card-timer .bloom-confirm{background:var(--bg)}
++.bloom-cancel-confirm>p{margin:0 0 10px}
++@media(max-width:600px){.bloom-habit-card-active>.bloom-habit-actions{width:100%}.bloom-timer-heading{gap:10px}.bloom-timer .bloom-clock{font-size:clamp(28px,9vw,36px)!important}.bloom-timer-actions button{flex-grow:1}}
++@media(prefers-reduced-motion:reduce){.bloom-timer-state.is-running .bloom-timer-indicator{animation:none}}
++.bloom-workspace.theme-dark .bloom-card-timer{background:#293d30;color:#eef5eb;border-color:#526b59}
++.bloom-workspace.theme-dark .bloom-card-timer .bloom-kicker,.bloom-workspace.theme-dark .bloom-card-timer .bloom-timer-state{color:#d4e5bf!important}
++@media(prefers-color-scheme:dark){.bloom-workspace.theme-system .bloom-card-timer{background:#293d30;color:#eef5eb;border-color:#526b59}.bloom-workspace.theme-system .bloom-card-timer .bloom-kicker,.bloom-workspace.theme-system .bloom-card-timer .bloom-timer-state{color:#d4e5bf!important}}
++.bloom-timer:not(.bloom-card-timer) p{color:#fff}
++.bloom-card-timer p{color:var(--text)}
++.bloom-card-timer .bloom-timer-note{color:var(--muted)}
++
++/* Stretched semantic link makes the card itself navigable; foreground action buttons remain separate controls. */
++.bloom-habit-card{position:relative;cursor:pointer;transition:border-color .18s,box-shadow .18s}
++.bloom-habit-card:hover{border-color:var(--accent);box-shadow:0 6px 20px #1d332515}
++.bloom-habit-card .bloom-habit-card-link{position:absolute;inset:0;z-index:0;display:block;border-radius:12px;color:transparent}
++.bloom-habit-card>.bloom-habit-heading,.bloom-habit-card>.bloom-habit-actions,.bloom-habit-card>.bloom-card-timer{position:relative;z-index:1;pointer-events:none}
++.bloom-habit-card button{position:relative;z-index:2;pointer-events:auto}
++.bloom-habit-card .bloom-habit-card-link:focus-visible{outline:3px solid #a9bf92;outline-offset:3px}
++
++.bloom-detail-page{max-width:900px;margin:22px auto 34px;scroll-margin-top:18px}
++.bloom-detail-topbar{display:flex;align-items:center;justify-content:space-between;gap:14px;margin:10px 0 22px}
++.bloom-detail-topbar .bloom-kicker{margin:0}
++.bloom-back-button{display:inline-flex;align-items:center;gap:8px;color:var(--accent)!important}
++.bloom-detail-hero{margin:8px 0 22px}
++.bloom-detail-hero h1{margin:4px 0 12px}
++.bloom-detail-description{max-width:680px;font-size:16px!important;color:var(--text)!important}
++.bloom-detail-meta{font-size:12px!important;color:var(--muted)}
++.bloom-detail-main-grid{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(280px,.9fr);gap:14px;align-items:start}
++.bloom-detail-main-grid>.bloom-panel{margin:10px 0}
++.bloom-detail-goal h2,.bloom-detail-actions-panel h2{margin:0 0 10px}
++.bloom-detail-goal>.bloom-kicker,.bloom-detail-actions-panel>.bloom-kicker{margin:0 0 8px}
++.bloom-detail-progress-heading{display:flex;justify-content:space-between;gap:12px;margin:16px 0 8px;font-size:13px}
++.bloom-detail-progress-track{height:8px;background:var(--line)}
++.bloom-detail-progress-track>span{background:#688b62}
++.bloom-detail-week-count{font-weight:700}
++.bloom-detail-scheduled{padding-top:10px;border-top:1px solid var(--line)}
++.bloom-detail-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;margin-top:14px}
++.bloom-detail-actions button{width:100%;min-height:44px}
++.bloom-detail-archive-confirm{grid-column:1/-1}
++.bloom-detail-summary{margin:18px 0 10px}
++.bloom-detail-summary .bloom-section-heading{margin:28px 0 12px}
++.bloom-detail-summary-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
++.bloom-detail-stat{display:flex;flex-direction:column;gap:8px;min-width:0;min-height:130px;margin:0}
++.bloom-detail-stat>span{font-size:11px;font-weight:700;letter-spacing:.05em;color:var(--muted)}
++.bloom-detail-stat>strong{font:400 clamp(25px,4vw,34px)/1.15 var(--serif);overflow-wrap:anywhere}
++.bloom-detail-stat>small{margin-top:auto;font-size:11px;line-height:1.55;color:var(--muted)}
++.bloom-detail-history .bloom-actions h2{margin:0}
++.bloom-detail-history-details{padding:18px 20px}
++.bloom-detail-history-details summary{cursor:pointer;font-size:14px;font-weight:700}
++.bloom-detail-history-details summary:focus-visible{outline:3px solid #a9bf92;outline-offset:4px}
++@media(max-width:760px){.bloom-detail-main-grid{grid-template-columns:1fr}}
++@media(max-width:600px){.bloom-detail-page{margin:10px auto 25px}.bloom-detail-topbar{align-items:flex-start;flex-direction:column;gap:4px;margin:8px 0 17px}.bloom-detail-summary-grid{grid-template-columns:1fr}.bloom-detail-stat{min-height:96px}.bloom-detail-actions{grid-template-columns:1fr}.bloom-detail-history .bloom-actions.bloom-spread{align-items:flex-start;flex-direction:column}}
+diff --git a/components/sessions/sessions-workspace.tsx b/components/sessions/sessions-workspace.tsx
+index 3dd9edf..6ad8e7a 100644
+--- a/components/sessions/sessions-workspace.tsx
++++ b/components/sessions/sessions-workspace.tsx
+@@ -1,6 +1,6 @@
+ "use client";
+ 
+-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
++import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
+ import { Brand } from "@/components/brand";
+ import { CalendarIcon, ChartIcon, SettingsIcon, SproutIcon } from "@/components/habits/icons";
+ import { LogoutButton } from "@/components/auth/logout-button";
+@@ -14,10 +14,29 @@ type Workspace = { habits: Habit[]; sessions: SessionRow[]; segments: SegmentRow
+ type Tab = "today" | "progress" | "settings";
+ const empty: Workspace = { habits: [], sessions: [], segments: [], versions: [], goals: [] };
+ const pendingKey = (userId: string) => `bloom.local.pending.${userId}`;
++const detailsHref = (view: Tab, habit: string) => {
++  const params = new URLSearchParams();
++  if (view !== "today") params.set("view", view);
++  params.set("habit", habit);
++  return `/dashboard?${params.toString()}`;
++};
+ const duration = (ms: number) => {
+   const seconds = Math.floor(ms / 1000);
+   return `${Math.floor(seconds / 3600)}:${String(Math.floor(seconds / 60) % 60).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
+ };
++const sessionCountLabel = (count: number) => `${count} ${count === 1 ? "session" : "sessions"}`;
++function sumSessionDuration(sessions: readonly SessionRow[], field: "duration_ms" | "estimated_ms"): number | null {
++  let total = 0, found = false;
++  for (const session of sessions) {
++    const value = session[field];
++    if (value === null) continue;
++    if (!Number.isSafeInteger(value) || value < 0) throw new Error("Invalid session duration");
++    total += value;
++    if (!Number.isSafeInteger(total)) throw new Error("Session duration total is too large");
++    found = true;
++  }
++  return found ? total : null;
++}
+ 
+ export function SessionsWorkspace({ userId, demo = false }: { userId: string; demo?: boolean }) {
+   const client = useMemo(() => demo ? null : createClient(), [demo]);
+@@ -27,6 +46,7 @@ export function SessionsWorkspace({ userId, demo = false }: { userId: string; de
+   const [busy, setBusy] = useState(false);
+   const lock = useRef(false);
+   const currentUrl = useRef("");
++  const detailOrigin = useRef<{ view: Tab; scrollY: number } | null>(null);
+   const [pending, setPending] = useState<Command | null>(null);
+   const [offline, setOffline] = useState(false);
+   const [now, setNow] = useState(() => Date.now());
+@@ -36,7 +56,7 @@ export function SessionsWorkspace({ userId, demo = false }: { userId: string; de
+   const [edit, setEdit] = useState<string | "new" | null>(null);
+   const [week, setWeek] = useState(() => weekStart(lagosDate()));
+   const [theme, setTheme] = useState<"system" | "light" | "dark">("system");
+-  const [cancelConfirm, setCancelConfirm] = useState(false);
++  const [cancelConfirm, setCancelConfirm] = useState<string | null>(null);
+   const [goalEdit, setGoalEdit] = useState<string | null>(null);
+   const [warningDismissedFor, setWarningDismissedFor] = useState<string | null>(null);
+   const [demoName, setDemoName] = useState("");
+@@ -89,7 +109,12 @@ export function SessionsWorkspace({ userId, demo = false }: { userId: string; de
+         window.history.pushState(null, "", currentUrl.current);
+         return;
+       }
++      let wasOnDetails = false;
++      try { wasOnDetails = currentUrl.current ? new URL(currentUrl.current).searchParams.has("habit") : false; } catch { /* ignore an unavailable previous URL */ }
++      const isLeavingDetails = wasOnDetails && !new URLSearchParams(window.location.search).has("habit");
++      const restoreScrollY = isLeavingDetails ? detailOrigin.current?.scrollY : undefined;
+       readLocation();
++      if (restoreScrollY !== undefined) window.requestAnimationFrame(() => window.scrollTo(0, restoreScrollY));
+     };
+     // Initial deep links are read only once, after hydration.
+     if (!currentUrl.current) readLocation();
+@@ -120,15 +145,30 @@ export function SessionsWorkspace({ userId, demo = false }: { userId: string; de
+   function abandonDraft() { return !(draftDirty || (tab === "settings" && profileDraft !== demoName)) || window.confirm("Discard your unsaved changes?"); }
+   function navigate(view: Tab, habit: string | null = null) {
+     if (!abandonDraft()) return;
++    if (habit) detailOrigin.current = { view, scrollY: window.scrollY };
++    else if (detail) detailOrigin.current = null;
+     const url = new URL(window.location.href);
+     if (view === "today") url.searchParams.delete("view"); else url.searchParams.set("view", view);
+     if (habit) url.searchParams.set("habit", habit); else url.searchParams.delete("habit");
+     window.history.pushState(null, "", url); currentUrl.current = url.href;
+     setTab(view); setDetail(habit); setEdit(null); setQuick(null); setGoalEdit(null); setArchiveConfirm(null); setDraftDirty(false); setProfileDraft(demoName);
+   }
++  function closeDetails() {
++    if (!abandonDraft()) return;
++    const view = detailOrigin.current?.view ?? tab;
++    const scrollY = detailOrigin.current?.scrollY ?? 0;
++    const url = new URL(window.location.href);
++    if (view === "today") url.searchParams.delete("view"); else url.searchParams.set("view", view);
++    url.searchParams.delete("habit");
++    window.history.replaceState(null, "", url); currentUrl.current = url.href;
++    detailOrigin.current = null;
++    setTab(view); setDetail(null); setEdit(null); setQuick(null); setGoalEdit(null); setArchiveConfirm(null); setDraftDirty(false); setProfileDraft(demoName);
++    window.requestAnimationFrame(() => window.scrollTo(0, scrollY));
++  }
+   function openEdit(habit: string) { if (!abandonDraft()) return; setQuick(null); setGoalEdit(null); setDraftDirty(false); setEdit(habit); }
+   function openQuick(habit: string) { if (!abandonDraft()) return; setEdit(null); setGoalEdit(null); setDraftDirty(false); setQuick(habit); }
+   function openGoal(habit: string) { if (!abandonDraft()) return; setEdit(null); setQuick(null); setDraftDirty(false); setGoalEdit(habit); }
++  function requestArchive(habit: string) { if (!abandonDraft()) return; setEdit(null); setQuick(null); setGoalEdit(null); setDraftDirty(false); setArchiveConfirm(habit); }
+   function closeDraft(close: () => void) { if (abandonDraft()) { close(); setDraftDirty(false); } }
+ 
+   useEffect(() => {
+@@ -149,7 +189,7 @@ export function SessionsWorkspace({ userId, demo = false }: { userId: string; de
+       if (cmd.kind === "goal") { setGoalEdit(null); setDraftDirty(false); }
+       if (cmd.kind === "habit_create" || cmd.kind === "habit_update") { setEdit(null); setDraftDirty(false); }
+       if (cmd.kind === "habit_archive") setArchiveConfirm(null);
+-      if (cmd.kind === "cancel") setCancelConfirm(false);
++      if (cmd.kind === "cancel") setCancelConfirm(null);
+       setSuccess(demo ? "Saved in this browser’s simulated workspace." : "Saved.");
+       try { await refresh(); } catch { setMessage("Your action was saved, but the display could not refresh. Reload to see the latest state."); }
+     } catch (error) {
+@@ -179,8 +219,13 @@ export function SessionsWorkspace({ userId, demo = false }: { userId: string; de
+   }
+ 
+   const today = lagosDate(new Date(now));
++  // Every view reads this same persisted session and segment list; `now` is display interpolation only.
+   const active = data.sessions.find(s => s.source === "timed" && (s.status === "running" || s.status === "paused"));
+   const activeHabit = data.habits.find(h => h.id === active?.habit_id);
++  const selected = data.habits.find(h => h.id === detail);
++  const hasDetailsTimer = Boolean(active && detail && selected && activeHabit);
++  const hasTodayTimerCard = tab === "today" && !detail && Boolean(active && activeHabit?.is_active);
++  const showGlobalTimer = Boolean(active && !hasTodayTimerCard && !hasDetailsTimer);
+   let elapsed = 0, timerError = false;
+   try { if (active) elapsed = timerDisplayMs(active, data.segments, now); } catch { timerError = true; }
+   const enabled = !busy && !pending && pendingReady && storageReady && dataReady && !offline;
+@@ -188,14 +233,27 @@ export function SessionsWorkspace({ userId, demo = false }: { userId: string; de
+   const progress = dailyHabitProgress(activeHabits.map(h => h.id), data.sessions, today);
+   const goalLabel = (habitId: string, monday: string) => {
+     if (!demo) return "Weekly session goal unavailable";
+-    try { const goal = goalForWeek(data.goals, habitId, monday); return goal.kind === "target" ? `${goal.value} sessions per week` : goal.kind === "none" ? "No weekly target" : "Weekly goal not confirmed"; }
++    try { const goal = goalForWeek(data.goals, habitId, monday); return goal.kind === "target" ? `${sessionCountLabel(goal.value)} per week` : goal.kind === "none" ? "No weekly target" : "Weekly goal not confirmed"; }
+     catch { return "Goal schedule pending"; }
+   };
+-  const selected = data.habits.find(h => h.id === detail);
+   const selectedVersions = data.versions.filter(v => v.habit_id === detail).sort((a,b) => b.recorded_at.localeCompare(a.recorded_at));
+   const selectedSessions = data.sessions.filter(s => s.habit_id === detail && s.status === "completed").sort((a,b) => (b.completed_on ?? "").localeCompare(a.completed_on ?? "") || b.created_at.localeCompare(a.created_at));
++  const selectedCompletedCount = new Set(selectedSessions.map(s => s.id)).size;
++  const selectedActiveDayCount = new Set(selectedSessions.map(s => s.completed_on).filter((day): day is string => day !== null)).size;
++  const selectedMeasuredMs = sumSessionDuration(selectedSessions, "duration_ms");
++  const selectedEstimatedMs = sumSessionDuration(selectedSessions, "estimated_ms");
++  const selectedUnknownDurationCount = selectedSessions.filter(s => s.duration_ms === null && s.estimated_ms === null).length;
++  const detailsWeek = weekStart(today);
++  let detailsGoal: ReturnType<typeof goalForWeek> = {kind:"unconfirmed"};
++  let detailsGoalPending = false;
++  if (demo && selected) {
++    try { detailsGoal = goalForWeek(data.goals, selected.id, detailsWeek); }
++    catch { detailsGoalPending = true; }
++  }
++  const detailsWeekSummary = selected ? weeklySummary(data.sessions, selected.id, detailsWeek, detailsGoal) : null;
+   const editHabit = data.habits.find(h => h.id === edit);
+-  const scheduledGoals = data.goals.filter(g => g.habit_id === detail && g.effective_week !== null && g.effective_week > weekStart(today)).sort((a,b) => (b.effective_week ?? "").localeCompare(a.effective_week ?? "") || Number(b.id) - Number(a.id));
++  const scheduledGoals = data.goals.filter(g => g.habit_id === detail && g.effective_week !== null && g.effective_week > detailsWeek).sort((a,b) => (b.effective_week ?? "").localeCompare(a.effective_week ?? "") || Number(b.id) - Number(a.id));
++  const detailBackLabel = tab[0].toUpperCase() + tab.slice(1);
+   return <div className={`bloom-workspace theme-${theme}`}>
+     <header className="bloom-header"><Brand /><span>{demo ? "Phase 1 · interactive simulation" : "Local development · sessions"}</span>{!demo && <LogoutButton />}</header>
+     <main className="bloom-main">
+@@ -206,15 +264,49 @@ export function SessionsWorkspace({ userId, demo = false }: { userId: string; de
+       {message && <p className="bloom-alert" role="alert">{message}</p>}
+       {pending && <section className="bloom-panel" aria-label="Unconfirmed action"><h2>Action needs confirmation</h2><p>The last {pending.kind} request may have succeeded. Retrying uses the same request ID and input.</p><div className="bloom-actions"><button disabled={busy || offline} onClick={() => void command(pending, true)}>Retry safely</button><button disabled={busy || offline} onClick={() => void discardPending()}>Refresh and discard retry</button></div></section>}
+       {loading ? <p role="status">Loading your habits and sessions…</p> : !dataReady ? <section className="bloom-panel"><p>Session data is not available; no data is being displayed as empty.</p><button onClick={() => { setLoading(true); void refresh().then(() => setMessage("")).catch(() => setMessage("Could not load sessions. Check the local database and try again.")).finally(() => setLoading(false)); }}>Retry loading</button></section> : <>
+-      {active && <section className="bloom-timer" aria-label="Current timer"><p className="bloom-kicker">YOUR TIMER · {active.status.toUpperCase()}</p><h2 id="timer-title">{activeHabit?.name ?? "Habit"}{activeHabit && !activeHabit.is_active ? " · archived" : ""}</h2>{timerError ? <p role="alert">Timer state is inconsistent. Refresh before taking action.</p> : <p className="bloom-clock" aria-label={`Elapsed time ${duration(elapsed)}`}>{duration(elapsed)}</p>}<p>{demo ? "Simulated timer: this browser’s clock records the time." : "Elapsed display is an estimate. The server records the final time."}</p>{elapsed >= FOUR_HOURS_MS && warningDismissedFor !== active.id && <div className="bloom-warning" role="status">This timer has run for four hours or more. It will keep running until you pause, complete or cancel it. <button onClick={() => setWarningDismissedFor(active.id)}>Continue timer</button></div>}<div className="bloom-actions"><button disabled={!enabled || timerError} onClick={() => void command({kind:active.status === "running" ? "pause" : "resume",session:active.id,request:crypto.randomUUID()})}>{active.status === "running" ? "Pause" : "Resume"}</button><button className="bloom-primary" disabled={!enabled || timerError} onClick={() => void command({kind:"complete",session:active.id,request:crypto.randomUUID()})}>Complete</button><button disabled={!enabled} onClick={() => setCancelConfirm(true)}>Cancel timer</button></div>{cancelConfirm && <div className="bloom-confirm"><p>Cancel this timer without recording a completed session?</p><button disabled={!enabled} onClick={() => void command({kind:"cancel",session:active.id,request:crypto.randomUUID()})}>Yes, cancel timer</button> <button onClick={() => setCancelConfirm(false)}>Keep timer</button></div>}</section>}
+-      {tab === "today" && <><section className="bloom-heading"><p className="bloom-kicker">{friendlyDate(today)} · LAGOS</p><h1>{demoName.trim() ? `Your space to grow, ${demoName.trim()}` : "Your space to grow"}<span>.</span></h1><p>Small steps, meaningful progress. Make a little room for what matters.</p><div className="bloom-daily-progress"><div className="bloom-progress-heading"><span>YOUR DAILY PROGRESS</span><strong>{progress.completed} / {progress.total} habits</strong></div><div className="bloom-progress-track" role="progressbar" aria-label="Today’s habit progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress.percentage}><span style={{width:`${progress.percentage}%`}} /></div><p>{progress.total ? "Completed habits today · multiple sessions are welcome." : "Add a habit to begin. An empty day is not counted as complete."}</p></div><button className="bloom-primary" disabled={!enabled} onClick={() => openEdit("new")}>Add a habit</button></section><section aria-labelledby="habits-title"><div className="bloom-section-heading"><div><p className="bloom-kicker">A MOMENT FOR YOU</p><h2 id="habits-title">Today’s habits <span>{activeHabits.length}</span></h2></div></div>{!activeHabits.length ? <p className="bloom-panel">No active habits yet. Add one to begin.</p> : <ul className="bloom-list">{activeHabits.map(h => {
++      {active && showGlobalTimer && <ActiveSessionTimer session={active} habit={activeHabit} elapsed={elapsed} timerError={timerError} enabled={enabled} demo={demo} variant="panel" cancelConfirm={cancelConfirm} warningDismissed={warningDismissedFor === active.id} onToggle={() => void command({kind:active.status === "running" ? "pause" : "resume",session:active.id,request:crypto.randomUUID()})} onComplete={() => void command({kind:"complete",session:active.id,request:crypto.randomUUID()})} onRequestCancel={() => setCancelConfirm(active.id)} onCancel={() => void command({kind:"cancel",session:active.id,request:crypto.randomUUID()})} onKeepTimer={() => setCancelConfirm(null)} onContinue={() => setWarningDismissedFor(active.id)} />}
++      {!detail && tab === "today" && <><section className="bloom-heading"><p className="bloom-kicker">{friendlyDate(today)} · LAGOS</p><h1>{demoName.trim() ? `Your space to grow, ${demoName.trim()}` : "Your space to grow"}<span>.</span></h1><p>Small steps, meaningful progress. Make a little room for what matters.</p><div className="bloom-daily-progress"><div className="bloom-progress-heading"><span>YOUR DAILY PROGRESS</span><strong>{progress.completed} / {progress.total} habits</strong></div><div className="bloom-progress-track" role="progressbar" aria-label="Today’s habit progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress.percentage}><span style={{width:`${progress.percentage}%`}} /></div><p>{progress.total ? "Completed habits today · multiple sessions are welcome." : "Add a habit to begin. An empty day is not counted as complete."}</p></div><button className="bloom-primary" disabled={!enabled} onClick={() => openEdit("new")}>Add a habit</button></section><section aria-labelledby="habits-title"><div className="bloom-section-heading"><div><p className="bloom-kicker">A MOMENT FOR YOU</p><h2 id="habits-title">Today’s habits <span>{activeHabits.length}</span></h2></div></div>{!activeHabits.length ? <p className="bloom-panel">No active habits yet. Add one to begin.</p> : <ul className="bloom-list">{activeHabits.map(h => {
+         const count = data.sessions.filter(s => s.habit_id === h.id && s.status === "completed" && s.completed_on === today).length;
+-        return <li className="bloom-panel bloom-habit-card" key={h.id}><div className="bloom-habit-heading"><span className="bloom-habit-icon"><SproutIcon aria-hidden="true" /></span><div><h3 id={`habit-title-${h.id}`}>{h.name}</h3><p>{count} {count === 1 ? "session" : "sessions"} today · {goalLabel(h.id, weekStart(today))}{h.preferred_time ? ` · preferred ${h.preferred_time.slice(0,5)}` : ""}</p></div></div><div className="bloom-actions"><button aria-describedby={`habit-title-${h.id}`} className="bloom-primary" disabled={!enabled || Boolean(active)} onClick={() => void command({kind:"start",habit:h.id,request:crypto.randomUUID()})}>Start timer</button><button aria-describedby={`habit-title-${h.id}`} disabled={!enabled} onClick={() => openQuick(h.id)}>Quick Log</button><button aria-describedby={`habit-title-${h.id}`} onClick={() => navigate(tab, h.id)}>Details</button></div></li>;
++        const cardTimer = !detail && active?.habit_id === h.id ? active : null;
++        return <li className={`bloom-panel bloom-habit-card${cardTimer ? " bloom-habit-card-active" : ""}`} key={h.id}><a className="bloom-habit-card-link" href={detailsHref(tab,h.id)} aria-label={`Open details for ${h.name}`} onClick={event => { if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return; event.preventDefault(); navigate(tab,h.id); }} /><div className="bloom-habit-heading"><span className="bloom-habit-icon"><SproutIcon aria-hidden="true" /></span><div><h3 id={`habit-title-${h.id}`}>{h.name}</h3><p>{count} {count === 1 ? "session" : "sessions"} today · {goalLabel(h.id, weekStart(today))}{h.preferred_time ? ` · preferred ${h.preferred_time.slice(0,5)}` : ""}</p></div></div>{cardTimer && <ActiveSessionTimer session={cardTimer} habit={h} elapsed={elapsed} timerError={timerError} enabled={enabled} demo={demo} variant="card" cancelConfirm={cancelConfirm} warningDismissed={warningDismissedFor === cardTimer.id} onToggle={() => void command({kind:cardTimer.status === "running" ? "pause" : "resume",session:cardTimer.id,request:crypto.randomUUID()})} onComplete={() => void command({kind:"complete",session:cardTimer.id,request:crypto.randomUUID()})} onRequestCancel={() => setCancelConfirm(cardTimer.id)} onCancel={() => void command({kind:"cancel",session:cardTimer.id,request:crypto.randomUUID()})} onKeepTimer={() => setCancelConfirm(null)} onContinue={() => setWarningDismissedFor(cardTimer.id)} />}<div className="bloom-actions bloom-habit-actions">{!cardTimer && <button aria-describedby={active ? `habit-title-${h.id} timer-state-${active.id}` : `habit-title-${h.id}`} title={active ? `A timer for ${activeHabit?.name ?? "another habit"} is already ${active.status}.` : undefined} className="bloom-primary" disabled={!enabled || Boolean(active)} onClick={() => void command({kind:"start",habit:h.id,request:crypto.randomUUID()})}>Start timer</button>}<button aria-describedby={`habit-title-${h.id}`} disabled={!enabled} onClick={() => openQuick(h.id)}>Quick Log</button><button aria-describedby={`habit-title-${h.id}`} onClick={() => navigate(tab, h.id)}>Details</button></div></li>;
+       })}</ul>}</section></>}
+-      {tab === "progress" && <section><p className="bloom-kicker">MONDAY–SUNDAY · LAGOS</p><h1>Progress</h1><div className="bloom-actions"><button onClick={() => setWeek(addDays(week,-7))}>Previous week</button><strong>{week} to {addDays(week,6)}</strong><button disabled={week >= weekStart(today)} onClick={() => setWeek(addDays(week,7))}>Next week</button></div><p>{demo ? "Goals below are simulated; changes begin next full Lagos week." : "Goal scheduling is unavailable; no target or achievement is assumed."}</p><ul className="bloom-list">{data.habits.map(h => { let goal: ReturnType<typeof goalForWeek> = {kind:"unconfirmed"}; let unresolved = false; try { if (demo) goal = goalForWeek(data.goals,h.id,week); } catch { unresolved = true; } const report = weeklySummary(data.sessions,h.id,week,goal); return <li className="bloom-panel" key={h.id}><h2 className="bloom-report-habit"><button className="bloom-link" onClick={() => navigate(tab, h.id)}>{h.name}</button>{!h.is_active && " · archived"}</h2><p>{report.sessions} {report.sessions === 1 ? "session" : "sessions"} · {report.activeDays} active {report.activeDays === 1 ? "day" : "days"}</p><p>{unresolved ? "Goal schedule pending; counts remain available." : goal.kind === "target" ? `Weekly target: ${goal.value} sessions${report.achieved ? " · achieved" : ""}` : goal.kind === "none" ? "No weekly target confirmed" : "Weekly goal not confirmed"}</p><p>Total time invested: {report.measuredMs === null && report.estimatedMs === null ? "none recorded" : duration((report.measuredMs ?? 0) + (report.estimatedMs ?? 0))}</p><p>Measured: {report.measuredMs === null ? "none recorded" : duration(report.measuredMs)} · Estimated: {report.estimatedMs === null ? "none recorded" : duration(report.estimatedMs)} · Unknown duration: {report.unknownDurationSessions}</p></li>; })}</ul>{data.habits.length === 0 && <p>No habits to report yet.</p>}</section>}
+-      {tab === "settings" && <section><p className="bloom-kicker">YOUR PREFERENCES</p><h1>Settings</h1><label>Theme <select value={theme} onChange={e => { const value = e.target.value as typeof theme; setTheme(value); try { localStorage.setItem("bloom.local.theme",value); } catch { setMessage("Theme preference could not be saved in this browser."); } }}><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label>{demo && <div className="bloom-panel bloom-form"><h2>Simulated profile</h2><form onSubmit={e => { e.preventDefault(); try { localStorage.setItem("bloom.phase1.profile", profileDraft.trim()); setDemoName(profileDraft.trim()); setProfileDraft(profileDraft.trim()); setSuccess("Simulated profile saved in this browser."); } catch { setMessage("Could not save the simulated profile."); } }}><label>Display name <input maxLength={80} value={profileDraft} onChange={e => setProfileDraft(e.target.value)} /></label><button type="submit">Save profile</button></form><p>This does not update a real account.</p></div>}{demo && <div className="bloom-panel"><h2>Demo data</h2><p>This workspace is simulated and kept only in this browser.</p><button disabled={!enabled} onClick={() => { if (window.confirm("Erase all simulated data in this browser?")) { resetDemo(); setDemoName(""); setProfileDraft(""); sessionStorage.removeItem(pendingKey(userId)); setPending(null); void refresh(); setSuccess("Simulated data cleared."); } }}>Reset simulated data</button></div>}<div className="bloom-panel"><h2>Account deletion</h2><p>Self-service deletion is not available in this local build. No deletion request will be submitted.</p><button disabled>Delete account unavailable</button></div></section>}
+-      {detail && !selected && <section className="bloom-panel"><h2>Habit not found</h2><p>This habit is not available in this workspace.</p><button onClick={() => navigate(tab)}>Back to {tab}</button></section>}
+-      {selected && <section className="bloom-panel bloom-detail" aria-labelledby="detail-title"><div className="bloom-actions bloom-spread"><h2 id="detail-title" tabIndex={-1}>{selected.name}{!selected.is_active && " · archived"}</h2><button onClick={() => { navigate(tab); }}>Close details</button></div>{selected.description && <p>{selected.description}</p>}<p>Preferred time: {selected.preferred_time?.slice(0,5) ?? "not set"} · {demo ? "Session goals are simulated" : "Goal scheduling unavailable"}</p>{demo && <p>Current week: {goalLabel(selected.id, weekStart(today))}.</p>}{demo && <p>{scheduledGoals.length ? `Scheduled from ${scheduledGoals[0].effective_week}: ${scheduledGoals[0].weekly_session_target === null ? "No weekly target" : `${scheduledGoals[0].weekly_session_target} sessions per week`}.` : "No upcoming simulated goal change."}</p>}{demo && selected.is_active && <button disabled={!enabled} onClick={() => openGoal(selected.id)}>Set weekly session goal</button>}{selected.is_active && <div className="bloom-actions"><button disabled={!enabled} onClick={() => openEdit(selected.id)}>Edit</button><button disabled={!enabled} onClick={() => { if (abandonDraft()) { setEdit(null); setQuick(null); setGoalEdit(null); setDraftDirty(false); setArchiveConfirm(selected.id); } }}>Archive</button></div>}{archiveConfirm === selected.id && <div className="bloom-confirm"><p>Archive this habit? Its history remains, and an existing timer can still be completed or cancelled.</p><button disabled={!enabled} onClick={() => void archiveHabit(selected.id)}>Yes, archive</button> <button onClick={() => setArchiveConfirm(null)}>Keep habit</button></div>}<h3>Session history</h3>{!selectedSessions.length ? <p>No completed sessions yet.</p> : <ol className="bloom-history">{selectedSessions.map(s => <li key={s.id}><strong>{s.completed_on}</strong> · {s.source === "legacy" ? "Imported" : s.source === "quick" ? "Quick Log" : "Timed"} · {s.duration_ms !== null ? `${duration(s.duration_ms)} measured` : s.estimated_ms !== null ? `${duration(s.estimated_ms)} estimated` : "duration unknown"}<p>Recorded {new Date(s.created_at).toLocaleString("en-GB", { timeZone: "Africa/Lagos" })} Lagos{data.versions.find(v => v.id === s.completion_version_id) ? ` · known name: ${data.versions.find(v => v.id === s.completion_version_id)!.name}` : ""}</p>{s.note && <p>{s.note}</p>}</li>)}</ol>}{demo && <><h3>Simulated goal history</h3>{data.goals.filter(g => g.habit_id === selected.id).length ? <ol className="bloom-history">{data.goals.filter(g => g.habit_id === selected.id).slice().reverse().map(g => <li key={g.id}>From {g.effective_week ?? "pending"}: {g.weekly_session_target === null ? "No weekly target" : `${g.weekly_session_target} sessions per week`}</li>)}</ol> : <p>No session goal has been confirmed.</p>}</>}<h3>Known settings history</h3><p>Only versions recorded since history was enabled are available; earlier changes are unknown.</p>{selectedVersions.length === 0 ? <p>No settings history available.</p> : <ol className="bloom-history">{selectedVersions.map(v => <li key={v.id}><strong>{new Date(v.recorded_at).toLocaleString("en-GB",{timeZone:"Africa/Lagos"})} Lagos</strong> · {v.is_baseline ? "baseline · " : ""}{v.name} · {v.is_active ? "active" : "archived"} · preferred time {v.preferred_time?.slice(0,5) ?? "not set"}{v.description && <p>{v.description}</p>}<p>Legacy schedule: {v.frequency}{v.target_per_week === null ? "" : `, ${v.target_per_week} days per week`}. This is not a session goal.</p></li>)}</ol>}</section>}
++      {!detail && tab === "progress" && <section><p className="bloom-kicker">MONDAY–SUNDAY · LAGOS</p><h1>Progress</h1><div className="bloom-actions"><button onClick={() => setWeek(addDays(week,-7))}>Previous week</button><strong>{week} to {addDays(week,6)}</strong><button disabled={week >= weekStart(today)} onClick={() => setWeek(addDays(week,7))}>Next week</button></div><p>{demo ? "Goals below are simulated; changes begin next full Lagos week." : "Goal scheduling is unavailable; no target or achievement is assumed."}</p><ul className="bloom-list">{data.habits.map(h => { let goal: ReturnType<typeof goalForWeek> = {kind:"unconfirmed"}; let unresolved = false; try { if (demo) goal = goalForWeek(data.goals,h.id,week); } catch { unresolved = true; } const report = weeklySummary(data.sessions,h.id,week,goal); return <li className="bloom-panel" key={h.id}><h2 className="bloom-report-habit"><button className="bloom-link" onClick={() => navigate(tab, h.id)}>{h.name}</button>{!h.is_active && " · archived"}</h2><p>{report.sessions} {report.sessions === 1 ? "session" : "sessions"} · {report.activeDays} active {report.activeDays === 1 ? "day" : "days"}</p><p>{unresolved ? "Goal schedule pending; counts remain available." : goal.kind === "target" ? `Weekly target: ${sessionCountLabel(goal.value)}${report.achieved ? " · achieved" : ""}` : goal.kind === "none" ? "No weekly target confirmed" : "Weekly goal not confirmed"}</p><p>Total time invested: {report.measuredMs === null && report.estimatedMs === null ? "none recorded" : duration((report.measuredMs ?? 0) + (report.estimatedMs ?? 0))}</p><p>Measured: {report.measuredMs === null ? "none recorded" : duration(report.measuredMs)} · Estimated: {report.estimatedMs === null ? "none recorded" : duration(report.estimatedMs)} · Unknown duration: {report.unknownDurationSessions}</p></li>; })}</ul>{data.habits.length === 0 && <p>No habits to report yet.</p>}</section>}
++      {!detail && tab === "settings" && <section><p className="bloom-kicker">YOUR PREFERENCES</p><h1>Settings</h1><label>Theme <select value={theme} onChange={e => { const value = e.target.value as typeof theme; setTheme(value); try { localStorage.setItem("bloom.local.theme",value); } catch { setMessage("Theme preference could not be saved in this browser."); } }}><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label>{demo && <div className="bloom-panel bloom-form"><h2>Simulated profile</h2><form onSubmit={e => { e.preventDefault(); try { localStorage.setItem("bloom.phase1.profile", profileDraft.trim()); setDemoName(profileDraft.trim()); setProfileDraft(profileDraft.trim()); setSuccess("Simulated profile saved in this browser."); } catch { setMessage("Could not save the simulated profile."); } }}><label>Display name <input maxLength={80} value={profileDraft} onChange={e => setProfileDraft(e.target.value)} /></label><button type="submit">Save profile</button></form><p>This does not update a real account.</p></div>}{demo && <div className="bloom-panel"><h2>Demo data</h2><p>This workspace is simulated and kept only in this browser.</p><button disabled={!enabled} onClick={() => { if (window.confirm("Erase all simulated data in this browser?")) { resetDemo(); setDemoName(""); setProfileDraft(""); sessionStorage.removeItem(pendingKey(userId)); setPending(null); void refresh(); setSuccess("Simulated data cleared."); } }}>Reset simulated data</button></div>}<div className="bloom-panel"><h2>Account deletion</h2><p>Self-service deletion is not available in this local build. No deletion request will be submitted.</p><button disabled>Delete account unavailable</button></div></section>}
++      {detail && !selected && <section className="bloom-detail-page bloom-panel" aria-labelledby="detail-title"><div className="bloom-detail-topbar"><button type="button" className="bloom-back-button" onClick={closeDetails}><span aria-hidden="true">←</span> Back to {detailBackLabel}</button><p className="bloom-kicker">HABIT DETAILS · LAGOS</p></div><h1 id="detail-title" tabIndex={-1}>Habit not found</h1><p>This habit is not available in this workspace.</p></section>}
++      {detail && selected && <HabitDetailsScreen
++        habit={selected}
++        backLabel={detailBackLabel}
++        demo={demo}
++        enabled={enabled}
++        currentWeek={detailsWeek}
++        goal={detailsGoal}
++        goalPending={detailsGoalPending}
++        weekSummary={detailsWeekSummary!}
++        completedSessionCount={selectedCompletedCount}
++        activeDayCount={selectedActiveDayCount}
++        measuredMs={selectedMeasuredMs}
++        estimatedMs={selectedEstimatedMs}
++        unknownDurationCount={selectedUnknownDurationCount}
++        history={selectedSessions}
++        versions={selectedVersions}
++        allVersions={data.versions}
++        goalHistory={data.goals.filter(g => g.habit_id === selected.id)}
++        scheduledGoals={scheduledGoals}
++        hasActiveTimer={Boolean(active)}
++        activeTimerId={active?.id ?? null}
++        activeTimerStatus={active?.status ?? null}
++        activeTimerHabit={activeHabit}
++        timer={active && hasDetailsTimer ? <ActiveSessionTimer session={active} habit={activeHabit} elapsed={elapsed} timerError={timerError} enabled={enabled} demo={demo} variant="panel" cancelConfirm={cancelConfirm} warningDismissed={warningDismissedFor === active.id} onToggle={() => void command({kind:active.status === "running" ? "pause" : "resume",session:active.id,request:crypto.randomUUID()})} onComplete={() => void command({kind:"complete",session:active.id,request:crypto.randomUUID()})} onRequestCancel={() => setCancelConfirm(active.id)} onCancel={() => void command({kind:"cancel",session:active.id,request:crypto.randomUUID()})} onKeepTimer={() => setCancelConfirm(null)} onContinue={() => setWarningDismissedFor(active.id)} /> : null}
++        archiveConfirm={archiveConfirm === selected.id}
++        onBack={closeDetails}
++        onStartTimer={() => void command({kind:"start",habit:selected.id,request:crypto.randomUUID()})}
++        onQuickLog={() => openQuick(selected.id)}
++        onEdit={() => openEdit(selected.id)}
++        onSetGoal={() => openGoal(selected.id)}
++        onArchive={() => requestArchive(selected.id)}
++        onConfirmArchive={() => void archiveHabit(selected.id)}
++        onKeepArchive={() => setArchiveConfirm(null)}
++      />}
+       </>}
+       {goalEdit && <GoalForm key={goalEdit} habit={data.habits.find(h => h.id === goalEdit)} disabled={!enabled} onClose={() => closeDraft(() => setGoalEdit(null))} onDirty={() => setDraftDirty(true)} onSubmit={target => void command({kind:"goal",request:crypto.randomUUID(),habit:goalEdit,target})} />}
+       {quick && <QuickForm key={quick} habit={data.habits.find(h => h.id === quick)} today={today} disabled={!enabled} onClose={() => closeDraft(() => setQuick(null))} onDirty={() => setDraftDirty(true)} onSubmit={(date, estimatedMs, note) => void command({kind:"quick",request:crypto.randomUUID(),habit:quick,date,estimatedMs,note})} />}
+@@ -224,6 +316,143 @@ export function SessionsWorkspace({ userId, demo = false }: { userId: string; de
+   </div>;
+ }
+ 
++type ActiveSessionTimerProps = {
++  session: SessionRow;
++  habit: Habit | undefined;
++  elapsed: number;
++  timerError: boolean;
++  enabled: boolean;
++  demo: boolean;
++  variant: "card" | "panel";
++  cancelConfirm: string | null;
++  warningDismissed: boolean;
++  onToggle: () => void;
++  onComplete: () => void;
++  onRequestCancel: () => void;
++  onCancel: () => void;
++  onKeepTimer: () => void;
++  onContinue: () => void;
++};
++
++/** Both placements render the same loaded session; this component owns no timer state or clock. */
++function ActiveSessionTimer({ session, habit, elapsed, timerError, enabled, demo, variant, cancelConfirm, warningDismissed, onToggle, onComplete, onRequestCancel, onCancel, onKeepTimer, onContinue }: ActiveSessionTimerProps) {
++  const running = session.status === "running";
++  const stateId = `timer-state-${session.id}`;
++  return <section className={`bloom-timer${variant === "card" ? " bloom-card-timer" : ""}`} aria-label={`Current timer for ${habit?.name ?? "habit"}`}>
++    <div className="bloom-timer-heading">
++      <div className="bloom-timer-copy">
++        <p id={stateId} className="bloom-kicker">YOUR TIMER · {session.status.toUpperCase()}</p>
++        <p className={`bloom-timer-state${running ? " is-running" : " is-paused"}`}><span className="bloom-timer-indicator" aria-hidden="true" />{running ? "Timer running" : "Timer paused"}</p>
++        {variant === "panel" && <h2>{habit?.name ?? "Habit"}{habit && !habit.is_active ? " · archived" : ""}</h2>}
++      </div>
++      {timerError ? <p role="alert">Timer state is inconsistent. Refresh before taking action.</p> : <p className="bloom-clock" role="timer" aria-live="off" aria-label={`Elapsed time ${duration(elapsed)}`}>{duration(elapsed)}</p>}
++    </div>
++    <p className="bloom-timer-note">{demo ? "Simulated timer: this browser’s clock records the time." : "Elapsed display is an estimate. The server records the final time."}</p>
++    {elapsed >= FOUR_HOURS_MS && !warningDismissed && <div className="bloom-warning" role="status">This timer has run for four hours or more. It will keep running until you pause, complete or cancel it. <button type="button" onClick={onContinue}>Continue timer</button></div>}
++    <div className="bloom-actions bloom-timer-actions"><button type="button" disabled={!enabled || timerError} onClick={onToggle}>{running ? "Pause" : "Resume"}</button><button type="button" className="bloom-primary" disabled={!enabled || timerError} onClick={onComplete}>Complete</button><button type="button" className="bloom-timer-cancel" disabled={!enabled} onClick={onRequestCancel}>Cancel timer</button></div>
++    {cancelConfirm === session.id && <div className="bloom-confirm bloom-cancel-confirm" role="group" aria-labelledby={`cancel-prompt-${session.id}`}><p id={`cancel-prompt-${session.id}`} role="alert">Cancel this timer without recording a completed session?</p><button type="button" className="bloom-timer-cancel" disabled={!enabled} onClick={onCancel}>Yes, cancel timer</button> <button type="button" onClick={onKeepTimer}>Keep timer</button></div>}
++  </section>;
++}
++
++type HabitDetailsScreenProps = {
++  habit: Habit;
++  backLabel: string;
++  demo: boolean;
++  enabled: boolean;
++  currentWeek: string;
++  goal: ReturnType<typeof goalForWeek>;
++  goalPending: boolean;
++  weekSummary: ReturnType<typeof weeklySummary>;
++  completedSessionCount: number;
++  activeDayCount: number;
++  measuredMs: number | null;
++  estimatedMs: number | null;
++  unknownDurationCount: number;
++  history: SessionRow[];
++  versions: VersionRow[];
++  allVersions: VersionRow[];
++  goalHistory: DemoGoal[];
++  scheduledGoals: DemoGoal[];
++  hasActiveTimer: boolean;
++  activeTimerId: string | null;
++  activeTimerStatus: SessionRow["status"] | null;
++  activeTimerHabit: Habit | undefined;
++  timer: ReactNode;
++  archiveConfirm: boolean;
++  onBack: () => void;
++  onStartTimer: () => void;
++  onQuickLog: () => void;
++  onEdit: () => void;
++  onSetGoal: () => void;
++  onArchive: () => void;
++  onConfirmArchive: () => void;
++  onKeepArchive: () => void;
++};
++
++function HabitDetailsScreen({ habit, backLabel, demo, enabled, currentWeek, goal, goalPending, weekSummary, completedSessionCount, activeDayCount, measuredMs, estimatedMs, unknownDurationCount, history, versions, allVersions, goalHistory, scheduledGoals, hasActiveTimer, activeTimerId, activeTimerStatus, activeTimerHabit, timer, archiveConfirm, onBack, onStartTimer, onQuickLog, onEdit, onSetGoal, onArchive, onConfirmArchive, onKeepArchive }: HabitDetailsScreenProps) {
++  const hasKnownTime = measuredMs !== null || estimatedMs !== null;
++  const targetProgress = goal.kind === "target" && !goalPending ? Math.min(goal.value, weekSummary.sessions) : 0;
++  const progressPercent = goal.kind === "target" && !goalPending ? Math.min(100, Math.round(weekSummary.sessions * 100 / goal.value)) : 0;
++  const startReason = hasActiveTimer
++    ? `A timer for ${activeTimerHabit?.name ?? "another habit"} is already ${activeTimerStatus ?? "active"}. Complete or cancel it before starting another.`
++    : !habit.is_active ? "Archived habits cannot start a new timer." : undefined;
++  return <section className="bloom-detail-page" aria-labelledby="detail-title">
++    <div className="bloom-detail-topbar"><button type="button" className="bloom-back-button" onClick={onBack}><span aria-hidden="true">←</span> Back to {backLabel}</button><span className="bloom-kicker">HABIT DETAILS · LAGOS</span></div>
++    <header className="bloom-detail-hero">
++      <p className="bloom-kicker">{habit.is_active ? "ACTIVE HABIT" : "ARCHIVED HABIT"}</p>
++      <h1 id="detail-title" tabIndex={-1}>{habit.name}</h1>
++      <p className="bloom-detail-description">{habit.description || "No description added yet."}</p>
++      <p className="bloom-detail-meta">Preferred time: {habit.preferred_time?.slice(0,5) ?? "not set"} · {demo ? "Goals and session timestamps are simulated" : "Weekly goal scheduling unavailable in this local adapter"}</p>
++    </header>
++    {timer}
++    <div className="bloom-detail-main-grid">
++      <section className="bloom-panel bloom-detail-goal" aria-labelledby="detail-goal-title">
++        <p className="bloom-kicker">LAGOS WEEK · {currentWeek}–{addDays(currentWeek,6)}</p>
++        <h2 id="detail-goal-title">Weekly session goal</h2>
++        {!demo && <p>Goal scheduling is unavailable here; no target is assumed. Weekly counts remain available.</p>}
++        {demo && goalPending && <p role="status">Goal schedule pending; completed-session counts remain available.</p>}
++        {demo && !goalPending && goal.kind === "target" && <>
++          <p>Weekly target: {goal.value} completed {goal.value === 1 ? "session" : "sessions"}.</p>
++          <div className="bloom-detail-progress-heading"><span>Current progress</span><strong>{weekSummary.sessions} / {goal.value} {goal.value === 1 ? "session" : "sessions"}</strong></div>
++          <div className="bloom-progress-track bloom-detail-progress-track" role="progressbar" aria-label={`Weekly session goal for ${habit.name}`} aria-valuemin={0} aria-valuemax={goal.value} aria-valuenow={targetProgress} aria-valuetext={`${targetProgress} of ${goal.value} ${goal.value === 1 ? "session" : "sessions"} completed`}><span style={{width:`${progressPercent}%`}} /></div>
++        </>}
++        {demo && !goalPending && goal.kind === "none" && <p>No weekly target confirmed.</p>}
++        {demo && !goalPending && goal.kind === "unconfirmed" && <p>Weekly goal not confirmed.</p>}
++        <p className="bloom-detail-week-count">This week: {weekSummary.sessions} completed {weekSummary.sessions === 1 ? "session" : "sessions"} · {weekSummary.activeDays} active {weekSummary.activeDays === 1 ? "day" : "days"}.</p>
++        {demo && scheduledGoals.length > 0 && <p className="bloom-detail-scheduled">Next confirmed change: from {scheduledGoals[0].effective_week}, {scheduledGoals[0].weekly_session_target === null ? "No weekly target" : `${sessionCountLabel(scheduledGoals[0].weekly_session_target)} per week`}.</p>}
++        {demo && habit.is_active && <button type="button" disabled={!enabled} onClick={onSetGoal}>Set weekly session goal</button>}
++      </section>
++      <section className="bloom-panel bloom-detail-actions-panel" aria-labelledby="detail-actions-title">
++        <p className="bloom-kicker">YOUR NEXT STEP</p>
++        <h2 id="detail-actions-title">Habit actions</h2>
++        {hasActiveTimer && <p id="detail-active-timer-note">A {activeTimerStatus ?? "active"} timer is already in progress{activeTimerHabit?.name ? ` for ${activeTimerHabit.name}` : ""}. Use its controls above; a second timer is blocked.</p>}
++        <div className="bloom-actions bloom-detail-actions">
++          <button type="button" className="bloom-primary" aria-describedby={hasActiveTimer && activeTimerId ? `timer-state-${activeTimerId}` : undefined} title={startReason} disabled={!enabled || !habit.is_active || hasActiveTimer} onClick={onStartTimer}>Start Timer</button>
++          <button type="button" disabled={!enabled || !habit.is_active} onClick={onQuickLog}>Quick Log</button>
++          {habit.is_active && <button type="button" disabled={!enabled} onClick={onEdit}>Edit Habit</button>}
++          {habit.is_active && <button type="button" className="bloom-secondary" disabled={!enabled} onClick={onArchive}>Archive Habit</button>}
++        </div>
++        {!habit.is_active && <p>This habit is archived. It can no longer start new sessions; its history is preserved.</p>}
++        {archiveConfirm && <div className="bloom-confirm bloom-detail-archive-confirm" role="group" aria-labelledby={`archive-prompt-${habit.id}`}><p id={`archive-prompt-${habit.id}`} role="alert">Archive {habit.name}? Its history remains, and an existing timer may still be completed or cancelled.</p><button type="button" className="bloom-secondary" disabled={!enabled} onClick={onConfirmArchive}>Yes, archive habit</button><button type="button" onClick={onKeepArchive}>Keep habit</button></div>}
++      </section>
++    </div>
++    <section className="bloom-detail-summary" aria-labelledby="detail-summary-title">
++      <div className="bloom-section-heading"><div><p className="bloom-kicker">ALL-TIME OVERVIEW</p><h2 id="detail-summary-title">Your progress</h2></div></div>
++      <div className="bloom-detail-summary-grid">
++        <article className="bloom-panel bloom-detail-stat"><span>Completed sessions</span><strong>{completedSessionCount}</strong><small>All time · cancelled sessions excluded</small></article>
++        <article className="bloom-panel bloom-detail-stat"><span>Active days</span><strong>{activeDayCount}</strong><small>Distinct Lagos completion dates</small></article>
++        <article className="bloom-panel bloom-detail-stat bloom-detail-time-stat"><span>Total time invested</span><strong>{hasKnownTime ? duration((measuredMs ?? 0) + (estimatedMs ?? 0)) : "none recorded"}</strong><small>Measured: {measuredMs === null ? "none recorded" : duration(measuredMs)} · Estimated: {estimatedMs === null ? "none recorded" : duration(estimatedMs)} · Unknown duration: {unknownDurationCount}</small></article>
++      </div>
++    </section>
++    <section className="bloom-panel bloom-detail-history" aria-labelledby="detail-history-title">
++      <div className="bloom-actions bloom-spread"><div><p className="bloom-kicker">YOUR JOURNEY</p><h2 id="detail-history-title">Session history</h2></div><span>{completedSessionCount} completed</span></div>
++      {!history.length ? <p>No completed sessions yet.</p> : <ol className="bloom-history">{history.map(session => <li key={session.id}><strong>{session.completed_on ?? "Completion date unavailable"}</strong> · {session.source === "legacy" ? "Imported" : session.source === "quick" ? "Quick Log" : "Timed"} · {session.duration_ms !== null ? `${duration(session.duration_ms)} measured` : session.estimated_ms !== null ? `${duration(session.estimated_ms)} estimated` : "duration unknown"}<p>Recorded {new Date(session.created_at).toLocaleString("en-GB",{timeZone:"Africa/Lagos"})} Lagos{allVersions.find(v => v.id === session.completion_version_id) ? ` · known name: ${allVersions.find(v => v.id === session.completion_version_id)!.name}` : ""}</p>{session.note && <p>{session.note}</p>}</li>)}</ol>}
++    </section>
++    {demo && <details className="bloom-panel bloom-detail-history-details"><summary>Simulated goal history</summary>{goalHistory.length ? <ol className="bloom-history">{goalHistory.slice().reverse().map(g => <li key={g.id}>From {g.effective_week ?? "pending"}: {g.weekly_session_target === null ? "No weekly target" : `${sessionCountLabel(g.weekly_session_target)} per week`}</li>)}</ol> : <p>No session goal has been confirmed.</p>}</details>}
++    <details className="bloom-panel bloom-detail-history-details"><summary>Known habit settings history</summary><p>Only versions recorded since history was enabled are available; earlier changes are unknown.</p>{versions.length ? <ol className="bloom-history">{versions.map(version => <li key={version.id}><strong>{new Date(version.recorded_at).toLocaleString("en-GB",{timeZone:"Africa/Lagos"})} Lagos</strong> · {version.is_baseline ? "baseline · " : ""}{version.name} · {version.is_active ? "active" : "archived"} · preferred time {version.preferred_time?.slice(0,5) ?? "not set"}{version.description && <p>{version.description}</p>}<p>Legacy schedule: {version.frequency}{version.target_per_week === null ? "" : `, ${version.target_per_week} days per week`}. This is not a session goal.</p></li>)}</ol> : <p>No settings history available.</p>}</details>
++  </section>;
++}
++
+ function QuickForm({ habit, today, disabled, onClose, onDirty, onSubmit }: { habit: Habit | undefined; today: string; disabled: boolean; onClose: () => void; onDirty: () => void; onSubmit: (date: string, estimatedMs: number | null, note: string | null) => void }) {
+   const [error, setError] = useState("");
+   function submit(e: FormEvent<HTMLFormElement>) {
+diff --git a/docs/phase1-ui-checkpoint.md b/docs/phase1-ui-checkpoint.md
+index dfceca0..9210c59 100644
+--- a/docs/phase1-ui-checkpoint.md
++++ b/docs/phase1-ui-checkpoint.md
+@@ -1,29 +1,92 @@
+-# Phase 1 UI checkpoint — not a release
++# Phase 1 UI checkpoint — locally verified, not approved or released
+ 
+-**Phase 1 remains in progress.** The session workspace now occupies the normal `/dashboard` route in an explicitly enabled synthetic mode. Without that mode the existing authenticated legacy dashboard is preserved. This protects existing users but also means the default dashboard is still the legacy day-log experience: a real integrated session backend is not established. The mock is not production-ready and no release or review is requested by this checkpoint.
++**Phase 1 remains in progress.** The Habit Details screen and interactive Today cards are implemented and pass the local checks below. This is not approval to release, deploy, push, start Phase 2, or treat the simulated workspace as production-ready. Changes are uncommitted on `bloom/phase-1-app`; no hosted database, Production configuration, or deployed Preview was changed for this correction.
+ 
+-## Dashboard and safety boundary
++The older Vercel Preview is still the earlier checkpoint at commit `35aa86b63051dc2ccd7284a471763d59c82e635f`; it does **not** contain these local changes and is not evidence for this implementation. Its authenticated rendering was previously blocked by Vercel SSO. Independent review of the current UI is still required before any phase decision.
+ 
+-- In an isolated local environment, set `BLOOM_PHASE1_DEMO=1` to use `/dashboard` with browser-local synthetic data. The landing page offers a clearly labelled simulation link. `/bloom-phase1` is only a redirect to `/dashboard` when simulation is enabled; it is not a second workspace.
+-- Simulation is refused if `VERCEL_ENV=production` or if `NEXT_PUBLIC_SUPABASE_URL` is configured to anything other than a literal loopback host. When the flag is absent, the existing authenticated dashboard remains unchanged. Neither the demo adapter nor its dashboard proxy calls Supabase. Do not set the flag or change hosted environment configuration without separate permission.
+-- A persistent banner explains that habits, timestamps and simulated goal weeks are stored locally, not on a server, and are not synced or production-ready. Simulated timestamps and goal effective weeks use the browser clock; they do not implement or prove the actual-commit rule, cross-device concurrency, database authority or recovery. Never use real data in this demo.
+-- Today, Progress and Settings share one workspace and URL navigation. Deep links and browser back/forward preserve view and habit details. The interface confirms before discarding changed forms and retains an open Quick Log when an unrelated timer operation succeeds. Draft forms are reset when switching habits; fields are disabled while a command is pending. The screen explicitly describes offline pause behavior, separates measured/estimated/unknown durations, keeps counts when a goal is unresolved, and leaves account deletion unavailable.
+-- Habit management, session/timer and goal interfaces use the same synthetic adapter and state; no experimental SQL was promoted into migrations. Authentication screens remain the existing implementation and were tested only with mocked responses. The older `/bloom-local` route is a separately fenced local database test path, not a production bridge.
++## Changes in this checkpoint
+ 
+-## Local verification performed
++- `components/sessions/sessions-workspace.tsx`
++  - Added a dedicated, deep-linkable `HabitDetailsScreen`. It presents the habit name and description, current Lagos-week goal and progress, completed-session count, distinct completed Lagos days, measured/estimated/unknown time, and dated session history with recorded durations and notes.
++  - Added Start Timer, Quick Log, Edit, and Archive actions, with confirmation where needed. An active session is passed into the existing `ActiveSessionTimer`; Details does not own another timer, clock, or session state. The same timer controls remain available while Details is open.
++  - Made Today habit cards navigate through a stretched semantic link. Nested actions remain separate buttons. Back navigation restores the originating workspace and scroll position; the decorative back arrow is hidden from the accessible name.
++- `app/globals.css` — added card-link focus/hover behavior, timer-in-card styling, responsive details layout, dark/system theme styling, and a reduced-motion rule.
++- `tests/phase1-demo.browser.mjs` — expanded browser coverage for Details, metrics and goal progress, timer lifecycle, pause exclusion, Lagos midnight, full browser-process close/reopen, Quick Log during a timer, and the four-hour warning.
++- `tests/phase1-navigation.browser.mjs` — expanded card, nested-action, history/back, keyboard focus, cross-tab, timer-blocking, reduced-motion, and axe coverage.
++- `tests/session-ui.mock.mjs` — updated archive labels and makes the intercepted completion response deliberately differ from the extrapolated timer display, checking which value the history UI uses.
++- `tests/session-core.test.mjs` — asserts display interpolation does not mutate the session’s persisted duration.
+ 
+-The final source was copied without `.env*`, and the tests below used synthetic identities and endpoints only:
++## Shared timer and analytics evidence
+ 
+-- Node 22: typecheck, lint, 11 unit tests and a production build passed. A stale generated type referencing a discarded test fixture caused one initial typecheck failure in the disposable copy; clearing that copy's generated `.next` directory and rerunning passed. No repository or production files were removed.
+-- `phase1-demo.browser.mjs` passed in Chromium at 390px/dark and 1440px/light: landing-to-dashboard navigation, habit and session journeys, timer recovery, backdated Quick Log, target/no target, offline handling, profiles/themes, reporting and per-view state. It checked simulated five-hour warning, multiple logs, cancellation and unresolved goal counts. There were no non-local browser requests in those journeys.
+-- `phase1-navigation.browser.mjs` passed at both viewports: draft-discard confirmation, browser back, one active timer in the mock, switching forms between habits without carrying inputs, deep links, missing details and automated axe scans on creation, Quick Log, goal, details, Progress and Settings views. A separate keyboard-focus and two-tab refresh scenario passed in the browser-local simulation; it does not prove concurrent-write safety. These scans do not constitute a full accessibility audit.
+-- `session-ui.mock.mjs` passed against intercepted synthetic PostgREST responses, including maintenance, retry, input locking during an uncertain response, an intentionally dropped response and the older local adapter. `phase1-auth.mock.mjs` passed synthetic auth UI cases. These do not test real Supabase authorization or real network behavior.
+-- The disabled alias returned 404 and signed-out dashboard redirected in the default local configuration. A synthetic hosted URL and a synthetic production environment each refused simulation; the enabled legacy alias redirected to `/dashboard`. No actual hosted project was queried.
++The workspace derives its active session from the loaded `data.sessions` and its elapsed display from `timerDisplayMs(active, data.segments, now)`. The Today card, non-Today panel, and Habit Details all receive that same session, segments, elapsed value, and command handlers. `ActiveSessionTimer` owns no clock or timer state. Pause, resume, complete, and cancel continue through the existing command path. This establishes shared **client UI state**, not backend authority or production reliability.
+ 
+-## Reproduction
++The executed synthetic browser scenarios verified:
+ 
+-Use a disposable source copy excluding `.env*`, `.git` and `.next`, with Node 22 and the existing dependencies. Build, then start with `BLOOM_PHASE1_DEMO=1` on port 3103. Run `tests/phase1-demo.browser.mjs` and `tests/phase1-navigation.browser.mjs`. For intercepted Auth and session tests, copy the harness fixture to `app/bloom-harness/page.tsx` only in the disposable copy, build/start on port 3100 with `NEXT_PUBLIC_SUPABASE_URL=http://127.0.0.1:54321` and a synthetic anon value, and run `tests/session-ui.mock.mjs` and `tests/phase1-auth.mock.mjs`. Their loopback requests are intercepted by Playwright. Do not substitute a hosted URL or credentials, and never ship the harness fixture. Chromium and its OS libraries are required.
++- One visible timer across Today, Progress, and Details; monotonic display while navigating; running and paused state through refresh; blocking another timer in both running and paused states; and cross-tab visibility in the browser-local simulation.
++- Persistence through a real Chromium process close/reopen using the same temporary browser profile, with one timer and no duplicate start.
++- Quick Log from Today and from Details while another timer is running; the timer remains running. Existing pause/resume/complete/cancel controls remain reachable. Cancellation is excluded from completed analytics.
++- A 60-second paused interval is excluded: a fake-clock run has 10 seconds active, 60 seconds paused, then 5 seconds active, displaying 15 seconds total. The completion at `2026-11-22T23:00:45Z` is attributed to Lagos Monday `2026-11-23`; the same scenario shows a 1/1 weekly target, one completed session, one active day, and 15 seconds measured in Details.
++- The four-hour warning does not stop the session; it remains running until an explicit action. Multiple logs, cancelled-session exclusion, distinct-day counts, unresolved-goal behavior, measured/estimated/unknown totals, dates, and history are checked.
++- The pure-core test leaves `duration_ms` null after display interpolation. In the intercepted PostgREST browser test, the displayed timer exceeds four hours but the mock returns a committed duration of 123,000 ms; history renders `0:02:03 measured`. This verifies client presentation behavior against a synthetic response only; it does not prove a real backend's authority.
+ 
+-## Still unverified or blocked
++## Verification performed and results
+ 
+-Real database/session integration, actual-commit goal scheduling, production authentication/security, real multi-device and phone-lock timer recovery, Storage/deletion, full accessibility and deployment/recovery readiness remain future-phase work. The default dashboard has not been switched to the new session data model because no approved backend exists. Simulated UI tests do not change these limitations. Shared Preview/Production database restrictions and phase approval gates remain in force.
++Repository-local checks, after the final test edits:
++
++```text
++npm run typecheck                                              PASS
++npm run lint                                                   PASS
++npx -y node@22 --experimental-strip-types --test tests/*.test.mjs  PASS — 11 tests, 0 failures
++git diff --check                                               PASS
++```
++
++A production build of the UI source passed in the sanitized `/home/user/bloom-phase1-final-review` copy (no `.env*`, `.git`, or prior generated build state):
++
++```text
++LD_LIBRARY_PATH=/home/user/bloom-browser-libs/root/usr/lib/x86_64-linux-gnu npx -y node@22 node_modules/next/dist/bin/next build
++```
++
++Next.js 16.4.6 compiled, typechecked, generated static pages, and finalized route output successfully. This build included the final UI component/CSS. A separate build with synthetic loopback variables was used only for the intercepted browser harness below; `app/bloom-harness/page.tsx` exists only in that disposable copy and is not a product change. A later repeat build in a second clean copy was killed by the runner during initial optimized compilation without a compiler diagnostic; no source error was reported. Typecheck and lint also exceeded their first 180-second timeouts when launched in parallel with the development preview; after stopping that process, sequential reruns passed (4.4 seconds and 7.2 seconds). The earlier successful build and browser runs cover the same functional UI; the only later UI-source delta was singular/plural goal-label wording, which passed the final typecheck/lint and current-source smoke. The isolated live development preview also passed browser smokes for `/dashboard`, simulated habit creation, and the Lagos-midnight goal scenario: 1/1 progress, 15 seconds measured, one active day, and 60 seconds paused excluded.
++
++Browser commands were run against that disposable copy, not a hosted service:
++
++```text
++BLOOM_PHASE1_DEMO=1 npx -y node@22 node_modules/next/dist/bin/next start -H 127.0.0.1 -p 3103
++LD_LIBRARY_PATH=/home/user/bloom-browser-libs/root/usr/lib/x86_64-linux-gnu npx -y node@22 tests/phase1-demo.browser.mjs
++LD_LIBRARY_PATH=/home/user/bloom-browser-libs/root/usr/lib/x86_64-linux-gnu npx -y node@22 tests/phase1-navigation.browser.mjs
++```
++
++Results:
++
++- `phase1-demo.browser.mjs` **passed** at 390px/dark and 1440px/light, plus edge cases, persistent-profile close/reopen, and fake-clock Lagos-midnight/goal checks. It reported no external browser requests or page errors; axe detected no violations on the scanned states. After the final singular/plural copy polish, the current-source preview reran the goal/pause/Details scenario successfully; the full suite was not repeated for that wording-only change.
++- `phase1-navigation.browser.mjs` **passed** at 390px/dark and 1440px/light, including deep links, card-surface navigation, independently usable nested actions, scroll restoration, keyboard focus moving to the Details heading, cross-tab updates, active/paused second-timer blocking, and reduced motion. The timer pulse computed to `none` in Today and Details for a reduced-motion context. Axe detected no violations on the scanned views/forms.
++
++The intercepted-only session/auth harness was built and served from the disposable copy with `NEXT_PUBLIC_SUPABASE_URL=http://127.0.0.1:54321` and `NEXT_PUBLIC_SUPABASE_ANON_KEY=synthetic-test-only`; Playwright intercepted those loopback requests. Reproduction commands (only in the disposable copy):
++
++```text
++mkdir -p app/bloom-harness
++cp tests/fixtures/bloom-harness-page.tsx.fixture app/bloom-harness/page.tsx
++NEXT_PUBLIC_SUPABASE_URL=http://127.0.0.1:54321 NEXT_PUBLIC_SUPABASE_ANON_KEY=synthetic-test-only LD_LIBRARY_PATH=/home/user/bloom-browser-libs/root/usr/lib/x86_64-linux-gnu npx -y node@22 node_modules/next/dist/bin/next build
++NEXT_PUBLIC_SUPABASE_URL=http://127.0.0.1:54321 NEXT_PUBLIC_SUPABASE_ANON_KEY=synthetic-test-only npx -y node@22 node_modules/next/dist/bin/next start -H 127.0.0.1 -p 3100
++LD_LIBRARY_PATH=/home/user/bloom-browser-libs/root/usr/lib/x86_64-linux-gnu npx -y node@22 tests/session-ui.mock.mjs
++LD_LIBRARY_PATH=/home/user/bloom-browser-libs/root/usr/lib/x86_64-linux-gnu npx -y node@22 tests/phase1-auth.mock.mjs
++```
++
++`tests/session-ui.mock.mjs` **passed** (including intentionally simulated HTTP 400 maintenance and HTTP 503 lost-response cases), and `tests/phase1-auth.mock.mjs` **passed**. These are UI simulations, not real Supabase Auth, PostgREST, or PostgreSQL tests.
++
++During verification, stale test labels/selectors for the old expandable details screen and old archive buttons were updated. The back arrow was marked decorative after its accessible name caused an exact-selector mismatch. A history selector was narrowed when the same habit description appeared in both Details and settings history. The final browser suites passed after those fixes.
++
++## Reproduction and safety boundary
++
++Use a disposable copy that excludes all `.env*` files, `.git`, `.next`, and generated state. The synthetic dashboard requires explicit `BLOOM_PHASE1_DEMO=1`; it stores data and timestamps in the browser only and does not sync or call Supabase. The test-only PostgREST harness fixture must never be added to the shipped application. Do not substitute hosted URLs, credentials, real user data, or Production settings.
++
++An isolated Arena sandbox Live Preview is running from `/home/user/bloom-phase1-preview-review` on port 3104. It is a clean copy with no `.env*` files, `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, or `VERCEL_ENV`; only `BLOOM_PHASE1_DEMO=1` is set. The dashboard and simulated habit creation passed a local browser smoke test. This is not a Vercel/hosted deployment, and browser data stays in that preview's local storage.
++
++## Still unverified / approval gates
++
++- **No backend or production evidence:** no real Supabase session integration, authorization/RLS proof, durable server timer recovery, actual-commit goal scheduling, multi-device/concurrent-write safety, security, or production persistence was exercised. Browser-local simulation uses its own clock and local storage. The mocked response-duration check tests only client behavior.
++- The ordinary `/dashboard` without the explicit simulation flag remains the existing authenticated legacy dashboard. This correction does not switch real users to the new session model or provide a release-ready integrated app.
++- Account deletion remains unavailable; full reauthentication, Storage cleanup, FK/race/stale-token and atomic-failure coverage remain unresolved. Comprehensive freeze/recovery, backup, backfill and rollback/forward-recovery gates remain as previously documented.
++- Axe and keyboard checks are useful but limited; they are not a full manual screen-reader, accessibility, device, or visual acceptance review. The current deployed Preview is stale.
++
++**Review status:** ready for independent review of the exact local UI in an isolated, non-production preview; not independently approved. The current uncommitted correction has not been pushed or deployed. Await the user's review/approval before Phase 2 or any release action.
+diff --git a/tests/phase1-demo.browser.mjs b/tests/phase1-demo.browser.mjs
+index 39b8bd8..199e62a 100644
+--- a/tests/phase1-demo.browser.mjs
++++ b/tests/phase1-demo.browser.mjs
+@@ -2,7 +2,11 @@
+ import { chromium } from 'playwright';
+ import AxeBuilder from '@axe-core/playwright';
+ import assert from 'node:assert/strict';
++import {mkdtemp,rm} from 'node:fs/promises';
++import {tmpdir} from 'node:os';
++import {join} from 'node:path';
+ const base='http://127.0.0.1:3103/dashboard';
++const seconds=clock=>{const [hours,minutes,secs]=clock.trim().split(':').map(Number);return hours*3600+minutes*60+secs;};
+ const browser=await chromium.launch({headless:true,args:['--no-sandbox']});
+ async function suite(viewport, colorScheme) {
+  const context=await browser.newContext({viewport,colorScheme});
+@@ -10,29 +14,40 @@ async function suite(viewport, colorScheme) {
+  const errors=[];page.on('pageerror',e=>errors.push(e.message));
+  const external=[];page.on('request',r=>{if(new URL(r.url()).origin!=='http://127.0.0.1:3103') external.push(r.url());});
+  const button=(name)=>page.getByRole('button',{name,exact:true});
++ const audit=async label=>{const results=await new AxeBuilder({page}).analyze();assert.deepEqual(results.violations.map(v=>({id:v.id,nodes:v.nodes.map(n=>n.target)})),[],`axe ${label}`);};
+  try {
+   await page.goto('http://127.0.0.1:3103/'); await page.getByRole('link',{name:'Explore simulated Bloom'}).click(); await page.getByText('Simulation only.').waitFor(); assert.equal(new URL(page.url()).pathname, '/dashboard');
+   await page.getByText('No active habits yet.').waitFor();
+-  const axe=await new AxeBuilder({page}).analyze(); assert.deepEqual(axe.violations.map(v=>v.id),[],'automated axe audit');
++  await audit('initial dashboard');
+   await button('Add a habit').click();
+   await page.getByLabel('Name',{exact:true}).fill('Read');
+   await page.getByLabel('Description').fill('Quiet time');
+   await button('Save habit').click(); await page.getByText('0 sessions today').waitFor();
+-  await button('Details').click(); assert.ok(new URL(page.url()).searchParams.get('habit')); await page.reload(); await button('Close details').waitFor(); await button('Set weekly session goal').click();
++  await button('Details').click(); assert.ok(new URL(page.url()).searchParams.get('habit')); await page.getByRole('heading',{name:'Read',exact:true,level:1}).waitFor(); await page.reload(); await page.getByRole('heading',{name:'Read',exact:true,level:1}).waitFor(); await button('Set weekly session goal').click();
+   await page.getByLabel('Sessions per week').fill('12'); await button('Confirm goal').click();
+-  await page.getByText('12 sessions per week',{exact:false}).first().waitFor();
+-  await button('Close details').click();
++  await page.getByText('Next confirmed change:',{exact:false}).waitFor(); await page.getByText('12 sessions per week',{exact:false}).first().waitFor();
++  await button('Back to Today').click();
+   await button('Start timer').click(); await page.getByText('YOUR TIMER · RUNNING').waitFor();
+-  await button('Progress').click(); await page.getByText('YOUR TIMER · RUNNING').waitFor(); assert.equal(new URL(page.url()).searchParams.get('view'),'progress'); await page.goBack(); await page.getByRole('heading',{name:'Today’s habits'}).waitFor(); await page.goForward(); await page.getByRole('heading',{name:'Progress'}).waitFor(); await button('Today').click();
++  const activeCard=page.locator('.bloom-habit-card').filter({has:page.getByRole('heading',{name:'Read',exact:true})});
++  assert.equal(await activeCard.getByRole('timer').count(),1,'one elapsed clock in the matching Today card');
++  assert.equal(await activeCard.getByRole('button',{name:'Start timer',exact:true}).count(),0,'the active card replaces Start with timer state');
++  for (const name of ['Pause','Complete','Cancel timer','Quick Log','Details']) assert.equal(await activeCard.getByRole('button',{name,exact:true}).isEnabled(),true,`${name} stays available on the active card`);
++  assert.equal(await page.getByRole('timer').count(),1,'Today has one authoritative timer display');
++  const firstElapsed=await page.getByRole('timer').textContent(); await page.waitForFunction(previous=>document.querySelector('[role="timer"]')?.textContent!==previous,firstElapsed,{timeout:4000});
++  const beforeRunningRefresh=await page.getByRole('timer').textContent(); await page.reload(); await page.getByText('YOUR TIMER · RUNNING').waitFor(); assert.equal(await page.getByRole('timer').count(),1); assert.ok(seconds(await page.getByRole('timer').textContent())>=seconds(beforeRunningRefresh),'running elapsed time survives a page refresh');
++  await button('Progress').click(); await page.getByText('YOUR TIMER · RUNNING').waitFor(); assert.equal(new URL(page.url()).searchParams.get('view'),'progress'); assert.equal(await page.getByRole('timer').count(),1,'Progress reflects the same single active timer'); const progressElapsed=await page.getByRole('timer').textContent(); await page.goBack(); await page.getByRole('heading',{name:'Today’s habits'}).waitFor(); assert.equal(await page.getByRole('timer').count(),1,'browser back returns to the same timer'); assert.ok(seconds(await page.getByRole('timer').textContent())>=seconds(progressElapsed),'elapsed display does not move backwards on navigation'); await page.goForward(); await page.getByRole('heading',{name:'Progress'}).waitFor(); assert.ok(seconds(await page.getByRole('timer').textContent())>=seconds(progressElapsed),'elapsed display stays monotonic when returning to Progress'); await button('Today').click();
+   await context.setOffline(true); await page.getByText('still running until a pause is confirmed',{exact:false}).waitFor(); assert.equal(await button('Pause').isDisabled(),true);
+   await context.setOffline(false); await button('Pause').click(); await page.getByText('YOUR TIMER · PAUSED').waitFor();
+-  await page.reload(); await page.getByText('YOUR TIMER · PAUSED').waitFor();
++  const pausedElapsed=await page.getByRole('timer').textContent(); await page.reload(); await page.getByText('YOUR TIMER · PAUSED').waitFor(); assert.equal(await page.getByRole('timer').textContent(),pausedElapsed,'a paused elapsed value survives refresh exactly');
+   await button('Resume').click(); await page.getByText('YOUR TIMER · RUNNING').waitFor();
+   await button('Quick Log').click(); await page.getByLabel('Note (optional)').fill('Do not lose me'); await button('Pause').click(); assert.equal(await page.getByLabel('Note (optional)').inputValue(),'Do not lose me'); await button('Resume').click(); await page.getByLabel('Lagos completion date').fill('9999-12-31'); assert.equal(await page.getByLabel('Lagos completion date').evaluate(el=>el.validity.rangeOverflow),true); await page.getByLabel('Lagos completion date').fill('2026-01-02'); await page.getByLabel('Estimated minutes (optional)').fill('12'); await page.getByLabel('Note (optional)').fill('A past session'); await button('Save session').click();
+-  await button('Details').click(); await page.getByText('A past session').waitFor(); await page.getByText(/^Recorded /).waitFor();
+-  await button('Edit').click(); await page.getByLabel('Name',{exact:true}).fill('Read deeply'); await button('Save habit').click(); await page.getByText('known name: Read',{exact:false}).waitFor();
+-  await button('Set weekly session goal').click(); await page.getByLabel('No weekly target').check(); await button('Confirm goal').click(); await page.getByText('Scheduled from ',{exact:false}).filter({hasText:'No weekly target'}).waitFor();
+-  await button('Archive').click(); await button('Yes, archive').click(); await page.getByText('archived',{exact:false}).first().waitFor();
++  await button('Details').click(); await page.getByText('A past session').waitFor(); await page.getByText(/^Recorded /).waitFor(); await page.getByText('YOUR TIMER · RUNNING').waitFor(); assert.equal(await page.getByRole('timer').count(),1,'the habit detail view retains the same active timer'); assert.equal(await page.locator('.bloom-detail-page').getByRole('timer').count(),1,'the dedicated details screen contains the active timer'); assert.equal(await page.locator('.bloom-habit-card').count(),0,'details replaces the Today card list without duplicating timer UI');
++  for (const name of ['Pause','Complete','Cancel timer','Quick Log','Edit Habit','Archive Habit']) assert.equal(await button(name).isEnabled(),true,`${name} remains available in Habit Details`); assert.equal(await button('Start Timer').isDisabled(),true,'a second timer is blocked from Habit Details');
++  await audit('habit details'); await button('Quick Log').click(); await page.getByRole('heading',{name:'Quick Log · Read',exact:true}).waitFor(); await page.getByLabel('Lagos completion date').fill('2026-01-03'); await page.getByLabel('Note (optional)').fill('Logged from Habit Details'); await audit('Quick Log from Habit Details'); await button('Save session').click(); await page.getByText('Saved in this browser',{exact:false}).waitFor(); await page.getByText('Logged from Habit Details',{exact:true}).waitFor(); await page.getByText('YOUR TIMER · RUNNING').waitFor(); assert.equal(await page.getByRole('timer').count(),1,'Quick Log from Details leaves the shared timer running');
++  assert.equal((await page.locator('.bloom-detail-stat').nth(0).locator('strong').textContent()).trim(),'2','all-time completed-session count'); assert.equal((await page.locator('.bloom-detail-stat').nth(1).locator('strong').textContent()).trim(),'2','distinct Lagos completion days'); assert.match(await page.locator('.bloom-detail-time-stat').innerText(),/Measured: none recorded · Estimated: 0:12:00 · Unknown duration: 1/,'details separates measured, estimated and unknown time');
++  await button('Edit Habit').click(); await page.getByLabel('Name',{exact:true}).fill('Read deeply'); await button('Save habit').click(); await page.getByText('known name: Read',{exact:false}).first().waitFor();
++  await button('Set weekly session goal').click(); await page.getByLabel('No weekly target').check(); await button('Confirm goal').click(); await page.getByText('Next confirmed change:',{exact:false}).filter({hasText:'No weekly target'}).waitFor();
++  await button('Archive Habit').click(); await button('Yes, archive habit').click(); await page.getByText('archived',{exact:false}).first().waitFor();
+   await button('Complete').click(); await button('Progress').click(); await page.getByText('Weekly goal not confirmed',{exact:true}).waitFor(); await page.getByText('1 session · 1 active day',{exact:true}).waitFor();
+   await button('Settings').click(); await page.getByLabel('Display name').fill('Tola'); await button('Save profile').click(); await page.getByText('Simulated profile saved',{exact:false}).waitFor(); await page.getByLabel('Theme').selectOption('dark'); await page.reload(); await page.getByLabel('Theme').waitFor(); assert.equal(await page.getByLabel('Theme').inputValue(),'dark'); assert.equal(await page.getByLabel('Display name').inputValue(),'Tola');
+   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false,'horizontal overflow');
+@@ -46,9 +61,9 @@ async function edgeCases() {
+  try {
+   await page.goto(base); await button('Add a habit').click(); await page.getByLabel('Name',{exact:true}).fill('Walk'); await button('Save habit').click(); await page.getByText('0 sessions today').waitFor();
+   await button('Start timer').click(); await page.getByText('YOUR TIMER · RUNNING').waitFor();
+-  const storage=await context.storageState(); const reopened=await browser.newContext({storageState:storage}); const second=await reopened.newPage(); await second.goto(base); await second.getByText('YOUR TIMER · RUNNING').waitFor(); await reopened.close();
++  const originalElapsed=await page.getByRole('timer').textContent(); const storage=await context.storageState(); const reopened=await browser.newContext({storageState:storage}); const second=await reopened.newPage(); await second.goto(base); await second.getByText('YOUR TIMER · RUNNING').waitFor(); assert.equal(await second.getByRole('timer').count(),1,'reopening shows one timer, not a second session'); assert.ok(seconds(await second.getByRole('timer').textContent())>=seconds(originalElapsed),'reopened timer resumes from the persisted segment'); await reopened.close();
+   await page.evaluate(()=>{const k='bloom.phase1.mock.v1',s=JSON.parse(localStorage.getItem(k));s.segments.find(x=>x.ended_at===null).started_at=new Date(Date.now()-5*3600_000).toISOString();localStorage.setItem(k,JSON.stringify(s));});
+-  await page.reload(); await page.getByText('four hours or more',{exact:false}).waitFor(); await button('Continue timer').click(); assert.equal(await page.getByText('four hours or more',{exact:false}).count(),0);
++  await page.reload(); await page.getByText('four hours or more',{exact:false}).waitFor(); assert.equal(await page.getByText('YOUR TIMER · RUNNING').count(),1,'four hours does not auto-stop the timer'); assert.ok(seconds(await page.getByRole('timer').textContent())>=5*3600); assert.equal(await button('Pause').isEnabled(),true); await button('Continue timer').click(); assert.equal(await page.getByText('four hours or more',{exact:false}).count(),0); assert.equal(await page.getByText('YOUR TIMER · RUNNING').count(),1,'dismissing the warning leaves the same session running');
+   for (let i=0;i<2;i++) {await button('Quick Log').click();await button('Save session').click();await page.getByText(`${i+1} ${i ? 'sessions' : 'session'} today`,{exact:false}).waitFor();}
+   await button('Cancel timer').click(); await button('Yes, cancel timer').click();
+   await button('Progress').click(); await page.getByText('2 sessions · 1 active day',{exact:true}).waitFor(); await page.getByText('Unknown duration: 2',{exact:false}).waitFor();
+@@ -57,4 +72,31 @@ async function edgeCases() {
+   console.log('PASS edge cases: four-hour continue, multiple daily logs, cancel exclusion, unknown duration, unresolved goal retains counts');
+  } finally {await context.close();}
+ }
+-try {await suite({width:390,height:844},'dark');await suite({width:1440,height:900},'light');await edgeCases();}finally{await browser.close();}
++async function browserClosureReopen() {
++ const profile=await mkdtemp(join(tmpdir(),'bloom-phase1-profile-')); let context;
++ const options={headless:true,viewport:{width:390,height:844},args:['--no-sandbox']};
++ try {
++  context=await chromium.launchPersistentContext(profile,options); let page=context.pages()[0]??await context.newPage();
++  await page.goto(base); await page.getByRole('button',{name:'Add a habit',exact:true}).click(); await page.getByLabel('Name',{exact:true}).fill('Persistent timer'); await page.getByRole('button',{name:'Save habit',exact:true}).click(); await page.getByRole('button',{name:'Start timer',exact:true}).click(); await page.getByText('YOUR TIMER · RUNNING').waitFor(); const before=await page.getByRole('timer').textContent();
++  await context.close(); context=null;
++  context=await chromium.launchPersistentContext(profile,options); page=context.pages()[0]??await context.newPage(); await page.goto(base); await page.getByText('YOUR TIMER · RUNNING').waitFor(); assert.equal(await page.getByRole('timer').count(),1,'the persisted browser profile reopens one shared timer'); assert.ok(seconds(await page.getByRole('timer').textContent())>=seconds(before),'timer state survives closing and reopening the browser process');
++  console.log('PASS persistent browser profile survives full Chromium close and reopen without starting a second timer');
++ } finally {if(context) await context.close(); await rm(profile,{recursive:true,force:true});}
++}
++async function pausedDurationAndLagosMidnight() {
++ const context=await browser.newContext({viewport:{width:390,height:844},colorScheme:'dark'}),page=await context.newPage();
++ const button=(name)=>page.getByRole('button',{name,exact:true});
++ try {
++  await page.clock.install({time:new Date('2026-11-22T22:59:30.000Z')}); await page.goto(base);
++  await button('Add a habit').click(); await page.getByLabel('Name',{exact:true}).fill('Midnight walk'); await button('Save habit').click();
++  await button('Details').click(); await page.getByRole('heading',{name:'Midnight walk',exact:true,level:1}).waitFor(); await button('Set weekly session goal').click(); await page.getByLabel('Sessions per week').fill('1'); await button('Confirm goal').click(); await page.getByText('Next confirmed change:',{exact:false}).filter({hasText:'1 session per week'}).waitFor(); await button('Back to Today').click();
++  await button('Start timer').click(); await page.getByText('YOUR TIMER · RUNNING').waitFor();
++  await page.clock.fastForward(10_000); await button('Pause').click(); await page.getByText('YOUR TIMER · PAUSED').waitFor(); const paused=await page.getByRole('timer').textContent(); assert.equal(seconds(paused),10,'first active segment is displayed');
++  await page.clock.fastForward(60_000); assert.equal(await page.getByRole('timer').textContent(),paused,'paused wall time is excluded from the elapsed timer');
++  await button('Resume').click(); await page.getByText('YOUR TIMER · RUNNING').waitFor(); await page.clock.fastForward(5_000); await button('Complete').click();
++  await page.getByText('1 session today',{exact:false}).waitFor(); await button('Details').click(); await page.getByRole('heading',{name:'Midnight walk',exact:true,level:1}).waitFor();
++  await page.getByText('2026-11-23',{exact:true}).waitFor(); await page.getByText('0:00:15 measured',{exact:false}).waitFor(); await page.getByText('This week: 1 completed session · 1 active day.',{exact:true}).waitFor(); await page.getByText('Weekly target: 1 completed session.',{exact:true}).waitFor(); assert.equal(await page.getByRole('progressbar',{name:'Weekly session goal for Midnight walk'}).getAttribute('aria-valuenow'),'1','goal progress reflects the completed session in the effective Lagos week'); assert.equal((await page.locator('.bloom-detail-stat').nth(0).locator('strong').textContent()).trim(),'1'); assert.equal((await page.locator('.bloom-detail-stat').nth(1).locator('strong').textContent()).trim(),'1'); assert.match(await page.locator('.bloom-detail-time-stat').innerText(),/Measured: 0:00:15 · Estimated: none recorded · Unknown duration: 0/); await page.locator('.bloom-detail-history').getByText('0:00:15 measured',{exact:false}).waitFor();
++  console.log('PASS fake-clock edge: detail metrics and 1/1 weekly goal; 10s + 5s active segments exclude 60s paused; completion at Lagos 00:00:45 is attributed to Monday 2026-11-23');
++ } finally {await context.close();}
++}
++try {await suite({width:390,height:844},'dark');await suite({width:1440,height:900},'light');await edgeCases();await browserClosureReopen();await pausedDurationAndLagosMidnight();}finally{await browser.close();}
+diff --git a/tests/phase1-navigation.browser.mjs b/tests/phase1-navigation.browser.mjs
+index 5c65926..d151ed4 100644
+--- a/tests/phase1-navigation.browser.mjs
++++ b/tests/phase1-navigation.browser.mjs
+@@ -12,17 +12,20 @@ try {
+  await btn('Add a habit').click(); await p.getByLabel('Name',{exact:true}).fill('Walk'); await audit('create habit');
+  p.once('dialog',d=>d.dismiss()); await btn('Progress').click(); assert.equal(await p.getByLabel('Name',{exact:true}).inputValue(),'Walk');
+  p.once('dialog',d=>d.accept()); await btn('Progress').click(); await p.getByRole('heading',{name:'Progress'}).waitFor(); await audit('empty progress');
+- await btn('Today').click(); await btn('Add a habit').click(); await p.getByLabel('Name',{exact:true}).fill('Walk'); await btn('Save habit').click(); await p.getByText('0 sessions today').waitFor();
++ await btn('Today').click(); await btn('Add a habit').click(); await p.getByLabel('Name',{exact:true}).fill('Walk'); await p.getByLabel('Description').fill('Morning movement'); await btn('Save habit').click(); await p.getByText('0 sessions today').waitFor();
+  await btn('Add a habit').click(); await p.getByLabel('Name',{exact:true}).fill('Read'); await btn('Save habit').click();
+- await p.getByRole('button',{name:'Quick Log'}).first().click(); await p.getByLabel('Note (optional)').fill('Do not carry to another habit'); p.once('dialog',d=>d.accept()); await p.getByRole('button',{name:'Quick Log'}).last().click(); await p.getByRole('heading',{name:'Quick Log · Read'}).waitFor(); assert.equal(await p.getByLabel('Note (optional)').inputValue(),''); await btn('Cancel').click();
+- await p.getByRole('button',{name:'Start timer'}).first().click(); await p.getByText('YOUR TIMER · RUNNING').waitFor(); assert.equal(await p.getByRole('button',{name:'Start timer'}).nth(1).isDisabled(),true);
++ const walkCard=p.locator('.bloom-habit-card').filter({has:p.getByRole('heading',{name:'Walk',exact:true})}); await walkCard.scrollIntoViewIfNeeded(); const scrollBeforeDetails=await p.evaluate(()=>window.scrollY); await walkCard.click({position:{x:12,y:12}}); await p.getByRole('heading',{name:'Walk',exact:true,level:1}).waitFor(); assert.equal(new URL(p.url()).searchParams.get('habit')!==null,true); assert.equal(await p.getByRole('heading',{name:'Today’s habits'}).count(),0,'details is a dedicated screen, not an expansion below Today'); await p.getByText('Morning movement',{exact:true}).first().waitFor(); await audit('habit card navigation'); await p.goBack(); await p.getByRole('heading',{name:'Today’s habits'}).waitFor(); await p.waitForFunction(y=>Math.abs(window.scrollY-y)<2,scrollBeforeDetails,{timeout:3000});
++ const readCard=p.locator('.bloom-habit-card').filter({has:p.getByRole('heading',{name:'Read',exact:true})}); await readCard.click({position:{x:12,y:12}}); await p.getByRole('heading',{name:'Read',exact:true,level:1}).waitFor(); assert.equal(new URL(p.url()).searchParams.get('habit')!==null,true,'the second card opens its own habit'); await btn('Back to Today').click(); await p.getByRole('heading',{name:'Today’s habits'}).waitFor();
++ await p.getByRole('button',{name:'Quick Log'}).first().click(); assert.equal(new URL(p.url()).searchParams.has('habit'),false,'Quick Log does not activate the card link'); await p.getByLabel('Note (optional)').fill('Do not carry to another habit'); p.once('dialog',d=>d.accept()); await p.getByRole('button',{name:'Quick Log'}).last().click(); await p.getByRole('heading',{name:'Quick Log · Read'}).waitFor(); assert.equal(await p.getByLabel('Note (optional)').inputValue(),''); await btn('Cancel').click();
++ await p.getByRole('button',{name:'Start timer'}).first().click(); assert.equal(new URL(p.url()).searchParams.has('habit'),false,'Start Timer remains an independent action'); await p.getByText('YOUR TIMER · RUNNING').waitFor(); assert.equal(await p.getByRole('timer').count(),1); assert.equal(await p.getByRole('button',{name:'Start timer',exact:true}).count(),1); assert.equal(await p.getByRole('button',{name:'Start timer',exact:true}).isDisabled(),true,'another habit cannot start a second timer'); await audit('running timer on Today'); await p.getByRole('button',{name:'Pause',exact:true}).click(); await p.getByText('YOUR TIMER · PAUSED').waitFor(); assert.equal(await p.getByRole('button',{name:'Start timer',exact:true}).isDisabled(),true,'a paused timer also blocks another habit'); await p.getByRole('button',{name:'Resume',exact:true}).click(); await p.getByText('YOUR TIMER · RUNNING').waitFor();
++ await p.getByRole('button',{name:'Quick Log'}).last().click(); await p.getByLabel('Note (optional)').fill('Quick Log during Walk timer'); await p.getByRole('button',{name:'Save session'}).click(); await p.getByText('Saved in this browser',{exact:false}).waitFor(); assert.equal(new URL(p.url()).searchParams.has('habit'),false,'saving Quick Log does not navigate to Details'); assert.equal(await p.getByText('YOUR TIMER · RUNNING').count(),1,'Quick Log leaves the other habit timer running');
+  await p.getByRole('button',{name:'Quick Log'}).last().click(); await p.getByLabel('Note (optional)').fill('An unsaved note'); await audit('quick log');
+  p.once('dialog',d=>d.dismiss()); await p.goBack(); assert.equal(await p.getByLabel('Note (optional)').inputValue(),'An unsaved note'); assert.equal(new URL(p.url()).pathname,'/dashboard');
+  p.once('dialog',d=>d.accept()); await btn('Progress').click(); await p.getByRole('heading',{name:'Progress'}).waitFor(); await audit('progress');
+- await p.getByRole('button',{name:'Walk',exact:true}).click(); await p.locator('#detail-title').waitFor(); await audit('habit details'); await btn('Set weekly session goal').click(); await audit('goal form'); await btn('Cancel').click();
++ await p.getByRole('button',{name:'Walk',exact:true}).click(); await p.locator('#detail-title').waitFor(); assert.equal(await p.getByRole('timer').count(),1); assert.equal(await p.locator('.bloom-detail-page').getByRole('timer').count(),1,'the dedicated details view contains the same active timer'); assert.equal(await p.getByRole('heading',{name:'Progress',exact:true}).count(),0,'details replaces Progress rather than expanding below it'); await audit('habit details'); await btn('Set weekly session goal').click(); await audit('goal form'); await btn('Cancel').click();
+  await btn('Settings').click(); await audit('settings'); await p.getByLabel('Display name').fill('Unsaved');
+  p.once('dialog',d=>d.accept()); await btn('Today').click(); await btn('Settings').click(); assert.equal(await p.getByLabel('Display name').inputValue(),'');
+- await p.goto('http://127.0.0.1:3103/dashboard?view=progress&habit=missing'); await p.getByText('Habit not found').waitFor(); await btn('Back to progress').click(); await p.getByRole('heading',{name:'Progress'}).waitFor();
++ await p.goto('http://127.0.0.1:3103/dashboard?view=progress&habit=missing'); await p.getByText('Habit not found').waitFor(); await btn('Back to Progress').click(); await p.getByRole('heading',{name:'Progress'}).waitFor();
+  console.log(`PASS ${viewport.width}px ${colorScheme} navigation: draft guards, browser back, one active timer, deep links, missing detail, and axe across forms/views`);
+ }finally{await c.close();}
+ }
+@@ -34,9 +37,21 @@ async function keyboardAndTabs() {
+   await p.keyboard.press('Tab'); assert.equal(await p.getByLabel('Name',{exact:true}).evaluate(el=>el===document.activeElement),true); await p.keyboard.type('Meditate');
+   await p.getByRole('button',{name:'Save habit'}).focus(); await p.keyboard.press('Enter'); await p.getByText('0 sessions today',{exact:false}).waitFor();
+   const other=await context.newPage(); await other.goto('http://127.0.0.1:3103/dashboard'); await other.getByText('Meditate').waitFor();
+-  await p.getByRole('button',{name:'Start timer'}).click(); await other.getByText('YOUR TIMER · RUNNING').waitFor(); assert.equal(await other.getByRole('button',{name:'Start timer'}).isDisabled(),true);
+-  await other.getByRole('button',{name:'Pause',exact:true}).click(); await p.getByText('YOUR TIMER · PAUSED').waitFor();
++  const cardLink=p.getByRole('link',{name:'Open details for Meditate'}); await cardLink.focus(); assert.equal(await cardLink.evaluate(el=>el===document.activeElement),true); await p.keyboard.press('Enter'); await p.getByRole('heading',{name:'Meditate',exact:true,level:1}).waitFor(); await p.waitForFunction(()=>document.activeElement?.id==='detail-title'); await p.getByRole('button',{name:'Back to Today'}).click(); await p.getByRole('heading',{name:'Today’s habits'}).waitFor();
++  await p.getByRole('button',{name:'Start timer'}).click(); await other.getByText('YOUR TIMER · RUNNING').waitFor(); assert.equal(await other.getByRole('timer').count(),1); assert.equal(await other.getByRole('button',{name:'Start timer',exact:true}).count(),0,'the only active habit card shows its timer instead of another Start action');
++  await other.getByRole('button',{name:'Pause',exact:true}).click(); await p.getByText('YOUR TIMER · PAUSED').waitFor(); assert.equal(await other.getByRole('button',{name:'Start timer',exact:true}).count(),0,'the active card has no Start action while the shared session is paused'); assert.equal(await other.getByRole('button',{name:'Resume',exact:true}).count(),1);
+   console.log('PASS keyboard focus and cross-tab refresh in browser-local simulation');
+  } finally {await context.close();}
+ }
+-try {await journey({width:390,height:844},'dark'); await journey({width:1440,height:900},'light'); await keyboardAndTabs();}finally{await browser.close();}
++async function reducedMotion() {
++ const context=await browser.newContext({viewport:{width:390,height:844},reducedMotion:'reduce'}),p=await context.newPage();
++ const btn=name=>p.getByRole('button',{name,exact:true});
++ try {
++  await p.goto('http://127.0.0.1:3103/dashboard'); await btn('Add a habit').click(); await p.getByLabel('Name',{exact:true}).fill('Breathe'); await btn('Save habit').click(); await btn('Start timer').click(); await p.getByText('YOUR TIMER · RUNNING').waitFor();
++  assert.equal(await p.evaluate(()=>matchMedia('(prefers-reduced-motion: reduce)').matches),true);
++  assert.equal(await p.locator('.bloom-timer-indicator').evaluate(el=>getComputedStyle(el).animationName),'none','running timer animation is disabled for reduced-motion users');
++  await btn('Details').click(); await p.getByRole('heading',{name:'Breathe',exact:true,level:1}).waitFor(); assert.equal(await p.locator('.bloom-timer-indicator').evaluate(el=>getComputedStyle(el).animationName),'none','the shared timer in Details also respects reduced motion');
++  console.log('PASS reduced-motion preference disables the pulse in Today and Habit Details');
++ } finally {await context.close();}
++}
++try {await journey({width:390,height:844},'dark'); await journey({width:1440,height:900},'light'); await keyboardAndTabs(); await reducedMotion();}finally{await browser.close();}
+diff --git a/tests/session-core.test.mjs b/tests/session-core.test.mjs
+index dafa0ec..6e0bfa6 100644
+--- a/tests/session-core.test.mjs
++++ b/tests/session-core.test.mjs
+@@ -9,7 +9,7 @@ test('same effective week uses newest id and unresolved schedules fail closed',(
+ test('weekly sessions, distinct active days and separate duration types',()=>{const s=[log('1','a','2025-01-01',{duration_ms:1000,source:'timed'}),log('2','a','2025-01-01',{estimated_ms:3000}),log('3','a','2025-01-02'),log('3','a','2025-01-02'),log('4','a','2025-01-06'),log('5','b','2025-01-01')];assert.deepEqual(weeklySummary(s,'a','2024-12-30',{kind:'target',value:2}),{sessions:3,activeDays:2,measuredMs:1000,estimatedMs:3000,unknownDurationSessions:1,goal:{kind:'target',value:2},achieved:true});});
+ test('completed sessions remain counted past goal; cancelled ignored',()=>{const s=Array.from({length:14},(_,i)=>log(String(i),'a','2025-01-01'));s.push(log('cancel','a','2025-01-01',{status:'cancelled'}));const w=weeklySummary(s,'a','2024-12-30',{kind:'target',value:2});assert.equal(w.sessions,14);assert.equal(w.activeDays,1);assert.equal(w.achieved,true);});
+ test('daily progress counts distinct visible habits and avoids empty-day perfection',()=>{const s=[log('1','a','2025-01-01'),log('2','a','2025-01-01'),log('3','c','2025-01-01')];assert.deepEqual(dailyHabitProgress(['a','b','a'],s,'2025-01-01'),{completed:1,total:2,percentage:50});assert.equal(dailyHabitProgress([],s,'2025-01-01').percentage,0);});
+-test('timer display excludes pause and never writes authoritative duration',()=>{const s={id:'x',status:'running',duration_ms:null};const seg=[{session_id:'x',started_at:'2026-11-01T00:00:00Z',ended_at:'2026-11-01T01:00:00Z'},{session_id:'x',started_at:'2026-11-01T02:00:00Z',ended_at:null}];assert.equal(timerDisplayMs(s,seg,Date.parse('2026-11-01T03:00:00Z')),7200000);assert.equal(timerDisplayMs({...s,status:'completed',duration_ms:42},seg,0),42);assert.throws(()=>timerDisplayMs({...s,status:'paused'},seg,Date.now()));assert.equal(FOUR_HOURS_MS,14400000);});
++test('timer display excludes pause and never writes authoritative duration',()=>{const s={id:'x',status:'running',duration_ms:null};const seg=[{session_id:'x',started_at:'2026-11-01T00:00:00Z',ended_at:'2026-11-01T01:00:00Z'},{session_id:'x',started_at:'2026-11-01T02:00:00Z',ended_at:null}];assert.equal(timerDisplayMs(s,seg,Date.parse('2026-11-01T03:00:00Z')),7200000);assert.equal(s.duration_ms,null,'display interpolation leaves persisted duration untouched');assert.equal(timerDisplayMs({...s,status:'completed',duration_ms:42},seg,0),42);assert.throws(()=>timerDisplayMs({...s,status:'paused'},seg,Date.now()));assert.equal(FOUR_HOURS_MS,14400000);});
+ test('unknown goal is not counted as achievement and invalid durations rejected',()=>{assert.equal(weeklySummary([],'a','2024-12-30',{kind:'none'}).achieved,null);assert.throws(()=>weeklySummary([log('x','a','2025-01-01',{duration_ms:1,estimated_ms:2})],'a','2024-12-30',{kind:'none'}));});
+ 
+ test('Lagos day and week cross on Sunday at 23:00 UTC', async()=>{
+diff --git a/tests/session-ui.mock.mjs b/tests/session-ui.mock.mjs
+index d296a50..0b01dd6 100644
+--- a/tests/session-ui.mock.mjs
++++ b/tests/session-ui.mock.mjs
+@@ -14,6 +14,7 @@ let habits=[{id:hid,user_id:uid,name:'Read',description:'A quiet moment',frequen
+ let sessions=[], segments=[], versions=[];
+ const ledger=new Map(); let dropped=false, maintenance=true;
+ const today=new Intl.DateTimeFormat('en-CA',{timeZone:'Africa/Lagos',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
++const elapsedSeconds = value => { const [hours,minutes,seconds] = value.trim().split(':').map(Number); return hours*3600+minutes*60+seconds; };
+ const reply = (route,status,body) => route.fulfill({status,headers:{'access-control-allow-origin':'*','access-control-allow-headers':'*','access-control-allow-methods':'GET,POST,OPTIONS','content-type':'application/json'},body:JSON.stringify(body)});
+ await page.route('http://127.0.0.1:54321/**',async route=>{
+   const request=route.request(); const url=new URL(request.url());
+@@ -40,7 +41,7 @@ await page.route('http://127.0.0.1:54321/**',async route=>{
+     if(s.status==='running'){const seg=segments.find(x=>x.session_id===s.id && x.ended_at===null);seg.ended_at=now;}
+     if(path==='bloom_pause_session')s.status='paused';
+     if(path==='bloom_resume_session'){s.status='running';segments.push({id:segments.length+1,session_id:s.id,user_id:uid,started_at:now,ended_at:null});}
+-    if(path==='bloom_complete_session'){s.status='completed';s.completed_at=now;s.completed_on=today;s.duration_ms=18000000;}
++    if(path==='bloom_complete_session'){s.status='completed';s.completed_at=now;s.completed_on=today;s.duration_ms=123000;}
+     if(path==='bloom_cancel_session')s.status='cancelled';
+     ledger.set(key,{session_id:s.id});
+   } else if(path==='bloom_archive_habit') {habits.find(h=>h.id===p.p_habit_id).is_active=false;ledger.set(key,{habit_id:p.p_habit_id});}
+@@ -71,8 +72,8 @@ try {
+   await page.getByRole('button',{name:'Retry safely'}).click(); await waitText('1 session today');
+   assert.equal(sessions.filter(s=>s.source==='quick').length,before);
+   await page.getByRole('button',{name:'Details',exact:true}).click(); await waitText('Mock quick entry');
+-  await page.getByRole('button',{name:'Archive',exact:true}).click(); await page.getByRole('button',{name:'Yes, archive'}).click();
+-  await waitText('archived'); await page.getByRole('button',{name:'Complete',exact:true}).click();
++  await page.getByRole('button',{name:'Archive Habit',exact:true}).click(); await page.getByRole('button',{name:'Yes, archive habit'}).click();
++  await waitText('archived'); const displayed=await page.getByRole('timer').textContent(); assert.ok(elapsedSeconds(displayed)>=4*3600,'the client display reflects more than four hours of elapsed segments'); await page.getByRole('button',{name:'Complete',exact:true}).click(); await waitText('0:02:03 measured'); assert.ok(elapsedSeconds(displayed)>elapsedSeconds('0:02:03'),'history uses the mocked committed duration, not the extrapolated browser display');
+   await page.getByRole('button',{name:'Progress',exact:true}).click(); await waitText('2 sessions · 1 active day');
+   await waitText('Estimated: 0:12:00');
+   await page.getByRole('button',{name:'Settings',exact:true}).click(); await waitText('Self-service deletion is not available');
+-- 
+2.47.3
+
