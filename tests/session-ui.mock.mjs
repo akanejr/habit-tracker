@@ -14,6 +14,7 @@ let habits=[{id:hid,user_id:uid,name:'Read',description:'A quiet moment',frequen
 let sessions=[], segments=[], versions=[];
 const ledger=new Map(); let dropped=false, maintenance=true;
 const today=new Intl.DateTimeFormat('en-CA',{timeZone:'Africa/Lagos',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
+const elapsedSeconds = value => { const [hours,minutes,seconds] = value.trim().split(':').map(Number); return hours*3600+minutes*60+seconds; };
 const reply = (route,status,body) => route.fulfill({status,headers:{'access-control-allow-origin':'*','access-control-allow-headers':'*','access-control-allow-methods':'GET,POST,OPTIONS','content-type':'application/json'},body:JSON.stringify(body)});
 await page.route('http://127.0.0.1:54321/**',async route=>{
   const request=route.request(); const url=new URL(request.url());
@@ -40,7 +41,7 @@ await page.route('http://127.0.0.1:54321/**',async route=>{
     if(s.status==='running'){const seg=segments.find(x=>x.session_id===s.id && x.ended_at===null);seg.ended_at=now;}
     if(path==='bloom_pause_session')s.status='paused';
     if(path==='bloom_resume_session'){s.status='running';segments.push({id:segments.length+1,session_id:s.id,user_id:uid,started_at:now,ended_at:null});}
-    if(path==='bloom_complete_session'){s.status='completed';s.completed_at=now;s.completed_on=today;s.duration_ms=18000000;}
+    if(path==='bloom_complete_session'){s.status='completed';s.completed_at=now;s.completed_on=today;s.duration_ms=123000;}
     if(path==='bloom_cancel_session')s.status='cancelled';
     ledger.set(key,{session_id:s.id});
   } else if(path==='bloom_archive_habit') {habits.find(h=>h.id===p.p_habit_id).is_active=false;ledger.set(key,{habit_id:p.p_habit_id});}
@@ -71,8 +72,8 @@ try {
   await page.getByRole('button',{name:'Retry safely'}).click(); await waitText('1 session today');
   assert.equal(sessions.filter(s=>s.source==='quick').length,before);
   await page.getByRole('button',{name:'Details',exact:true}).click(); await waitText('Mock quick entry');
-  await page.getByRole('button',{name:'Archive',exact:true}).click(); await page.getByRole('button',{name:'Yes, archive'}).click();
-  await waitText('archived'); await page.getByRole('button',{name:'Complete',exact:true}).click();
+  await page.getByRole('button',{name:'Archive Habit',exact:true}).click(); await page.getByRole('button',{name:'Yes, archive habit'}).click();
+  await waitText('archived'); const displayed=await page.getByRole('timer').textContent(); assert.ok(elapsedSeconds(displayed)>=4*3600,'the client display reflects more than four hours of elapsed segments'); await page.getByRole('button',{name:'Complete',exact:true}).click(); await waitText('0:02:03 measured'); assert.ok(elapsedSeconds(displayed)>elapsedSeconds('0:02:03'),'history uses the mocked committed duration, not the extrapolated browser display');
   await page.getByRole('button',{name:'Progress',exact:true}).click(); await waitText('2 sessions · 1 active day');
   await waitText('Estimated: 0:12:00');
   await page.getByRole('button',{name:'Settings',exact:true}).click(); await waitText('Self-service deletion is not available');
