@@ -8,7 +8,7 @@
   --bg: #f7f9f3;
   --panel: #ffffff;
   --text: #263a31;
-  --muted: #6b7f6e;
+  --muted: #566b59;
   --line: #dce6da;
   --accent: #2d5040;
   --accent-hover: #244232;
@@ -458,6 +458,18 @@
   color: var(--muted) !important;
 }
 
+/* Dark theme primary button — dark text on light green for contrast */
+.bloom-workspace.theme-dark .bloom-main .bloom-primary {
+  background: #3a6b4a;
+  color: #e8f5e8;
+  border-color: #3a6b4a;
+}
+
+.bloom-workspace.theme-dark .bloom-main .bloom-primary:hover:not(:disabled) {
+  background: #4a7d5a;
+  border-color: #4a7d5a;
+}
+
 /* Dark theme card timer */
 .bloom-workspace.theme-dark .bloom-card-timer {
   background: #1e3328;
@@ -470,6 +482,15 @@
 }
 
 @media (prefers-color-scheme: dark) {
+  .bloom-workspace.theme-system .bloom-main .bloom-primary {
+    background: #3a6b4a;
+    color: #e8f5e8;
+    border-color: #3a6b4a;
+  }
+  .bloom-workspace.theme-system .bloom-main .bloom-primary:hover:not(:disabled) {
+    background: #4a7d5a;
+    border-color: #4a7d5a;
+  }
   .bloom-workspace.theme-system .bloom-card-timer {
     background: #1e3328;
     border-color: #3a5244;

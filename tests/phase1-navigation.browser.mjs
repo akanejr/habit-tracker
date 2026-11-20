@@ -8,7 +8,7 @@ const c=await browser.newContext({viewport,colorScheme}),p=await c.newPage();
 const btn=(name)=>p.getByRole('button',{name,exact:true});
 const audit=async label=>{const results=await new AxeBuilder({page:p}).analyze(); assert.deepEqual(results.violations.map(x=>({id:x.id,nodes:x.nodes.map(n=>n.target)})),[],`axe ${label}`);};
 try {
- await p.goto('http://127.0.0.1:3103/dashboard'); await p.getByText('No active habits yet.').waitFor();
+ await p.goto('http://127.0.0.1:3103/dashboard'); await p.getByText('Your space is ready.').waitFor();
  await btn('Add a habit').click(); await p.getByLabel('Name',{exact:true}).fill('Walk'); await audit('create habit');
  p.once('dialog',d=>d.dismiss()); await btn('Progress').click(); assert.equal(await p.getByLabel('Name',{exact:true}).inputValue(),'Walk');
  p.once('dialog',d=>d.accept()); await btn('Progress').click(); await p.getByRole('heading',{name:'Progress'}).waitFor(); await audit('empty progress');

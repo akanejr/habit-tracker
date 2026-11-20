@@ -17,7 +17,7 @@ async function suite(viewport, colorScheme) {
  const audit=async label=>{const results=await new AxeBuilder({page}).analyze();assert.deepEqual(results.violations.map(v=>({id:v.id,nodes:v.nodes.map(n=>n.target)})),[],`axe ${label}`);};
  try {
   await page.goto('http://127.0.0.1:3103/'); await page.getByRole('link',{name:'Explore simulated Bloom'}).click(); await page.getByText('Simulation only.').waitFor(); assert.equal(new URL(page.url()).pathname, '/dashboard');
-  await page.getByText('No active habits yet.').waitFor();
+  await page.getByText('Your space is ready.').waitFor();
   await audit('initial dashboard');
   await button('Add a habit').click();
   await page.getByLabel('Name',{exact:true}).fill('Read');
