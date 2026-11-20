@@ -210,12 +210,14 @@
   opacity: 0.45;
 }
 
+.bloom-main button.bloom-primary,
 .bloom-main .bloom-primary {
   background: var(--accent);
   color: #fff;
   border-color: var(--accent);
 }
 
+.bloom-main button.bloom-primary:hover:not(:disabled),
 .bloom-main .bloom-primary:hover:not(:disabled) {
   background: var(--accent-hover);
   border-color: var(--accent-hover);
@@ -459,12 +461,14 @@
 }
 
 /* Dark theme primary button — dark text on light green for contrast */
+.bloom-workspace.theme-dark .bloom-main button.bloom-primary,
 .bloom-workspace.theme-dark .bloom-main .bloom-primary {
   background: #3a6b4a;
   color: #e8f5e8;
   border-color: #3a6b4a;
 }
 
+.bloom-workspace.theme-dark .bloom-main button.bloom-primary:hover:not(:disabled),
 .bloom-workspace.theme-dark .bloom-main .bloom-primary:hover:not(:disabled) {
   background: #4a7d5a;
   border-color: #4a7d5a;
@@ -482,11 +486,13 @@
 }
 
 @media (prefers-color-scheme: dark) {
+  .bloom-workspace.theme-system .bloom-main button.bloom-primary,
   .bloom-workspace.theme-system .bloom-main .bloom-primary {
     background: #3a6b4a;
     color: #e8f5e8;
     border-color: #3a6b4a;
   }
+  .bloom-workspace.theme-system .bloom-main button.bloom-primary:hover:not(:disabled),
   .bloom-workspace.theme-system .bloom-main .bloom-primary:hover:not(:disabled) {
     background: #4a7d5a;
     border-color: #4a7d5a;
