@@ -4,8 +4,9 @@
 
 The Next.js 16 App Router application uses the existing hosted Supabase project for Auth and Postgres. It is deployable on Vercel and has no Arena-specific production dependency. The development-only preview origin in `next.config.ts` permits Arena's hosted development preview.
 
-- `app/`: welcome, email/password forms, confirmation callback, and a minimal protected post-login landing. No habit-management interface is implemented yet.
+- `app/`: welcome, email/password forms, confirmation callback, and protected Today dashboard.
 - `components/auth/`: client-side forms and logout action.
+- `components/habits/` and `lib/habits/`: client-side habit management and Lagos calendar/progress logic.
 - `lib/supabase/client.ts`: browser client for Supabase Auth using the publishable key.
 - `lib/supabase/server.ts`: request-scoped server client for identity and RLS-protected queries.
 - `proxy.ts` and `lib/supabase/middleware.ts`: refresh the session and propagate Supabase's cookies and cache headers. Responses passing through the proxy are marked private/no-store.
@@ -24,7 +25,9 @@ Supabase SSR's browser client uses JavaScript-accessible cookies; this is not an
 
 `auth.users` has a one-to-one `profiles` row, and owns `habits` and `habit_logs`. The existing database uses RLS ownership policies, profile and timestamp triggers, and a composite ownership foreign key for logs. The approved Gate 2 privilege-hardening migration remains in effect. The application uses only the publishable key and the user's session; it never uses a service-role key or bypasses RLS.
 
-The two recorded SQL migrations are already applied to the current hosted project. No migration or hosted settings are changed by Milestone 1. Further database or security changes require their own review and approval.
+Milestone 2 adds an approved nullable `habits.preferred_time` column and an approved `habit_versions` table. An owner-only SELECT policy protects versions; a SECURITY DEFINER trigger writes snapshots atomically with each habit insert/update. Authenticated and anonymous clients cannot write version rows or execute the trigger function directly. Any pre-existing habits receive a baseline at migration time; previous states cannot be reconstructed. The existing three tables' policies and Gate 2 grants were not changed. The app archives habits by setting `is_active = false`, never by deleting them; existing database cascades remain unchanged.
+
+Lagos calendar dates determine Today and Monday–Sunday weeks. Weekly habits are shown until their target is met, but remain visible on a day already completed for undo. The UI checks the weekly count before insert; the database enforces one log per habit/date but does not atomically enforce a maximum weekly count. The existing records preserve completed dates and versioned settings; current-week calculations count all of that habit's week-to-date completions, including those made before an edit. Further database or security changes require their own review and approval.
 
 ## Configuration and deployment
 

@@ -1,0 +1,3 @@
+// Test-only page: copy into an isolated source tree, never into the deployed application.
+import { SessionsWorkspace } from "@/components/sessions/sessions-workspace";
+export default function Harness() { return <SessionsWorkspace userId="00000000-0000-4000-8000-000000000001"/>; }
