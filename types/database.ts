@@ -424,6 +424,34 @@ export interface Database {
           message: string;
         };
       };
+      record_incomplete_deletion: {
+        Args: {
+          p_user_id: string;
+          p_user_email: string;
+          p_error: string | null;
+        };
+        Returns: number;
+      };
+      retry_incomplete_deletions: {
+        Args: {};
+        Returns: {
+          id: number;
+          user_id: string;
+          user_email: string;
+          database_deleted_at: string;
+          auth_deletion_attempts: number;
+          last_attempt_at: string;
+          last_error: string | null;
+        }[];
+      };
+      mark_deletion_resolved: {
+        Args: { p_deletion_id: number };
+        Returns: void;
+      };
+      increment_deletion_attempt: {
+        Args: { p_deletion_id: number };
+        Returns: void;
+      };
     };
     Enums: Record<string, never>;
     CompositeTypes: Record<string, never>;
