@@ -151,7 +151,7 @@ async function testMigrationExecution() {
 
   await test('all RPC functions exist', async () => {
     const fns = await sql`
-      SELECT routine_name FROM information_schema.routines
+      SELECT DISTINCT routine_name FROM information_schema.routines
       WHERE routine_schema = 'public'
       AND routine_name IN (
         'bloom_start_session',
@@ -167,7 +167,8 @@ async function testMigrationExecution() {
       )
       ORDER BY routine_name
     `;
-    assert.strictEqual(fns.length, 10, `Expected 10 functions, got ${fns.length}`);
+    // Note: bloom_quick_log has 2 overloads (different signatures), so we use DISTINCT
+    assert.strictEqual(fns.length, 10, `Expected 10 unique functions, got ${fns.length}`);
   });
 }
 
@@ -179,7 +180,9 @@ async function testTimezoneFunctions() {
     const [result] = await sql`
       SELECT public.lagos_date('2026-11-25 23:00:00+00'::timestamptz) AS d
     `;
-    assert.strictEqual(result.d, '2026-11-26');
+    // PostgreSQL returns a date, convert to ISO string for comparison
+    const dateStr = result.d instanceof Date ? result.d.toISOString().split('T')[0] : result.d;
+    assert.strictEqual(dateStr, '2026-11-26');
   });
 
   await test('lagos_date handles midnight correctly', async () => {
@@ -187,7 +190,8 @@ async function testTimezoneFunctions() {
     const [result] = await sql`
       SELECT public.lagos_date('2026-11-25 22:59:00+00'::timestamptz) AS d
     `;
-    assert.strictEqual(result.d, '2026-11-25');
+    const dateStr = result.d instanceof Date ? result.d.toISOString().split('T')[0] : result.d;
+    assert.strictEqual(dateStr, '2026-11-25');
   });
 
   await test('lagos_week_start returns Monday', async () => {
@@ -195,21 +199,24 @@ async function testTimezoneFunctions() {
     const [result] = await sql`
       SELECT public.lagos_week_start('2026-11-25'::date) AS ws
     `;
-    assert.strictEqual(result.ws, '2026-11-23');
+    const dateStr = result.ws instanceof Date ? result.ws.toISOString().split('T')[0] : result.ws;
+    assert.strictEqual(dateStr, '2026-11-23');
   });
 
   await test('lagos_week_start returns same date for Monday', async () => {
     const [result] = await sql`
       SELECT public.lagos_week_start('2026-11-23'::date) AS ws
     `;
-    assert.strictEqual(result.ws, '2026-11-23');
+    const dateStr = result.ws instanceof Date ? result.ws.toISOString().split('T')[0] : result.ws;
+    assert.strictEqual(dateStr, '2026-11-23');
   });
 
   await test('lagos_week_start returns previous Monday for Sunday', async () => {
     const [result] = await sql`
       SELECT public.lagos_week_start('2026-11-29'::date) AS ws
     `;
-    assert.strictEqual(result.ws, '2026-11-23');
+    const dateStr = result.ws instanceof Date ? result.ws.toISOString().split('T')[0] : result.ws;
+    assert.strictEqual(dateStr, '2026-11-23');
   });
 }
 
@@ -257,7 +264,7 @@ async function testConstraintEnforcement() {
         estimated_ms, started_at, completed_at,
         start_version_id, completion_version_id
       ) VALUES (
-        ${TEST_USER_1}, ${TEST_HABIT_1}, 'quick_log', 'completed', 'manual',
+        ${TEST_USER_1}, ${TEST_HABIT_1}, 'quick', 'completed', 'quick',
         900000, now(), now(),
         (SELECT id FROM habit_versions WHERE habit_id = ${TEST_HABIT_1} LIMIT 1),
         (SELECT id FROM habit_versions WHERE habit_id = ${TEST_HABIT_1} LIMIT 1)
@@ -274,7 +281,7 @@ async function testConstraintEnforcement() {
         started_at, completed_at,
         start_version_id, completion_version_id
       ) VALUES (
-        ${TEST_USER_1}, ${TEST_HABIT_1}, 'legacy', 'completed', 'none',
+        ${TEST_USER_1}, ${TEST_HABIT_1}, 'legacy', 'completed', 'legacy',
         now(), now(),
         (SELECT id FROM habit_versions WHERE habit_id = ${TEST_HABIT_1} LIMIT 1),
         (SELECT id FROM habit_versions WHERE habit_id = ${TEST_HABIT_1} LIMIT 1)
@@ -904,7 +911,7 @@ async function testIdempotency() {
 
     // Verify only one session created
     const sessions = await sql`
-      SELECT COUNT(*) as cnt FROM public.habit_sessions WHERE source = 'quick_log' AND user_id = ${TEST_USER_1}
+      SELECT COUNT(*) as cnt FROM public.habit_sessions WHERE source = 'quick' AND user_id = ${TEST_USER_1}
     `;
     assert.strictEqual(Number(sessions[0].cnt), 1, 'Should only have one quick log session');
   });
@@ -1025,9 +1032,14 @@ async function testRLSPolicies() {
       `;
       assert.fail('Should have rejected direct insert');
     } catch (err) {
-      // Expected - no INSERT permission
-      assert.ok(err.message.includes('permission') || err.message.includes('denied'),
-        `Expected permission error, got: ${err.message}`);
+      // Expected - either permission denied or RLS policy violation
+      assert.ok(
+        err.message.includes('permission') || 
+        err.message.includes('denied') ||
+        err.message.includes('row-level security') ||
+        err.message.includes('RLS'),
+        `Expected permission or RLS error, got: ${err.message}`
+      );
     }
   });
 
