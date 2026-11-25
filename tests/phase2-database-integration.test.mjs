@@ -39,6 +39,7 @@ const TEST_USER_1 = '00000000-0000-0000-0000-000000000001';
 const TEST_USER_2 = '00000000-0000-0000-0000-000000000002';
 let TEST_HABIT_1;
 let TEST_HABIT_2;
+const TEST_RUN_ID = Date.now();
 
 // Helper to run a test
 async function test(name, fn) {
@@ -350,7 +351,7 @@ async function testSessionLifecycle() {
     await setAuth(sql, 'user1@test.com');
 
     const [result] = await sql`
-      SELECT public.bloom_start_session('req-start-1', ${TEST_HABIT_1}) AS r
+      SELECT public.bloom_start_session(${`req-start-1-${TEST_RUN_ID}`}, ${TEST_HABIT_1}) AS r
     `;
     
     assert.ok(result.r.session_id, 'Should return session_id');
@@ -376,11 +377,11 @@ async function testSessionLifecycle() {
     await setAuth(sql, 'user1@test.com');
 
     const [startResult] = await sql`
-      SELECT public.bloom_start_session('req-start-2', ${TEST_HABIT_1}) AS r
+      SELECT public.bloom_start_session(${`req-start-2-${TEST_RUN_ID}`}, ${TEST_HABIT_1}) AS r
     `;
 
     const [pauseResult] = await sql`
-      SELECT public.bloom_pause_session('req-pause-1', ${startResult.r.session_id}) AS r
+      SELECT public.bloom_pause_session(${`req-pause-1-${TEST_RUN_ID}`}, ${startResult.r.session_id}) AS r
     `;
     
     assert.strictEqual(pauseResult.r.status, 'paused');
@@ -399,12 +400,12 @@ async function testSessionLifecycle() {
     await setAuth(sql, 'user1@test.com');
 
     const [startResult] = await sql`
-      SELECT public.bloom_start_session('req-start-3', ${TEST_HABIT_1}) AS r
+      SELECT public.bloom_start_session(${`req-start-3-${TEST_RUN_ID}`}, ${TEST_HABIT_1}) AS r
     `;
-    await sql`SELECT public.bloom_pause_session('req-pause-2', ${startResult.r.session_id})`;
+    await sql`SELECT public.bloom_pause_session(${`req-pause-2-${TEST_RUN_ID}`}, ${startResult.r.session_id})`;
 
     const [resumeResult] = await sql`
-      SELECT public.bloom_resume_session('req-resume-1', ${startResult.r.session_id}) AS r
+      SELECT public.bloom_resume_session(${`req-resume-1-${TEST_RUN_ID}`}, ${startResult.r.session_id}) AS r
     `;
     
     assert.strictEqual(resumeResult.r.status, 'running');
@@ -424,14 +425,14 @@ async function testSessionLifecycle() {
     await setAuth(sql, 'user1@test.com');
 
     const [startResult] = await sql`
-      SELECT public.bloom_start_session('req-start-4', ${TEST_HABIT_1}) AS r
+      SELECT public.bloom_start_session(${`req-start-4-${TEST_RUN_ID}`}, ${TEST_HABIT_1}) AS r
     `;
 
     // Small delay
     await new Promise(r => setTimeout(r, 100));
 
     const [completeResult] = await sql`
-      SELECT public.bloom_complete_session('req-complete-1', ${startResult.r.session_id}) AS r
+      SELECT public.bloom_complete_session(${`req-complete-1-${TEST_RUN_ID}`}, ${startResult.r.session_id}) AS r
     `;
     
     assert.strictEqual(completeResult.r.status, 'completed');
@@ -450,11 +451,11 @@ async function testSessionLifecycle() {
     await setAuth(sql, 'user1@test.com');
 
     const [startResult] = await sql`
-      SELECT public.bloom_start_session('req-start-5', ${TEST_HABIT_1}) AS r
+      SELECT public.bloom_start_session(${`req-start-5-${TEST_RUN_ID}`}, ${TEST_HABIT_1}) AS r
     `;
 
     const [cancelResult] = await sql`
-      SELECT public.bloom_cancel_session('req-cancel-1', ${startResult.r.session_id}) AS r
+      SELECT public.bloom_cancel_session(${`req-cancel-1-${TEST_RUN_ID}`}, ${startResult.r.session_id}) AS r
     `;
     
     assert.strictEqual(cancelResult.r.status, 'cancelled');
@@ -466,7 +467,7 @@ async function testSessionLifecycle() {
     await setAuth(sql, 'user1@test.com');
 
     const [result] = await sql`
-      SELECT public.bloom_quick_log('req-quick-1', ${TEST_HABIT_1}, 1800000, 'Morning run') AS r
+      SELECT public.bloom_quick_log(${`req-quick-1-${TEST_RUN_ID}`}, ${TEST_HABIT_1}, 1800000, 'Morning run') AS r
     `;
     
     assert.strictEqual(result.r.status, 'completed');
@@ -479,12 +480,12 @@ async function testSessionLifecycle() {
     await setAuth(sql, 'user1@test.com');
 
     const [startResult] = await sql`
-      SELECT public.bloom_start_session('req-start-6', ${TEST_HABIT_1}) AS r
+      SELECT public.bloom_start_session(${`req-start-6-${TEST_RUN_ID}`}, ${TEST_HABIT_1}) AS r
     `;
-    await sql`SELECT public.bloom_complete_session('req-complete-2', ${startResult.r.session_id})`;
+    await sql`SELECT public.bloom_complete_session(${`req-complete-2-${TEST_RUN_ID}`}, ${startResult.r.session_id})`;
 
     try {
-      await sql`SELECT public.bloom_complete_session('req-complete-3', ${startResult.r.session_id})`;
+      await sql`SELECT public.bloom_complete_session(${`req-complete-3-${TEST_RUN_ID}`}, ${startResult.r.session_id})`;
       assert.fail('Should have rejected completing already completed session');
     } catch (err) {
       assert.ok(err.message.includes('cannot be completed'), 'Expected status error');
@@ -497,12 +498,12 @@ async function testSessionLifecycle() {
     await setAuth(sql, 'user1@test.com');
 
     const [startResult] = await sql`
-      SELECT public.bloom_start_session('req-start-7', ${TEST_HABIT_1}) AS r
+      SELECT public.bloom_start_session(${`req-start-7-${TEST_RUN_ID}`}, ${TEST_HABIT_1}) AS r
     `;
-    await sql`SELECT public.bloom_pause_session('req-pause-3', ${startResult.r.session_id})`;
+    await sql`SELECT public.bloom_pause_session(${`req-pause-3-${TEST_RUN_ID}`}, ${startResult.r.session_id})`;
 
     try {
-      await sql`SELECT public.bloom_pause_session('req-pause-4', ${startResult.r.session_id})`;
+      await sql`SELECT public.bloom_pause_session(${`req-pause-4-${TEST_RUN_ID}`}, ${startResult.r.session_id})`;
       assert.fail('Should have rejected pausing already paused session');
     } catch (err) {
       assert.ok(err.message.includes('not running'), 'Expected status error');
@@ -515,11 +516,11 @@ async function testSessionLifecycle() {
     await setAuth(sql, 'user1@test.com');
 
     const [startResult] = await sql`
-      SELECT public.bloom_start_session('req-start-8', ${TEST_HABIT_1}) AS r
+      SELECT public.bloom_start_session(${`req-start-8-${TEST_RUN_ID}`}, ${TEST_HABIT_1}) AS r
     `;
 
     try {
-      await sql`SELECT public.bloom_resume_session('req-resume-2', ${startResult.r.session_id})`;
+      await sql`SELECT public.bloom_resume_session(${`req-resume-2-${TEST_RUN_ID}`}, ${startResult.r.session_id})`;
       assert.fail('Should have rejected resuming running session');
     } catch (err) {
       assert.ok(err.message.includes('not paused'), 'Expected status error');
@@ -535,10 +536,10 @@ async function testSingleActiveSession() {
     await setupTestData();
     await setAuth(sql, 'user1@test.com');
 
-    await sql`SELECT public.bloom_start_session('req-active-1', ${TEST_HABIT_1})`;
+    await sql`SELECT public.bloom_start_session(${`req-active-1-${TEST_RUN_ID}`}, ${TEST_HABIT_1})`;
 
     try {
-      await sql`SELECT public.bloom_start_session('req-active-2', ${TEST_HABIT_1})`;
+      await sql`SELECT public.bloom_start_session(${`req-active-2-${TEST_RUN_ID}`}, ${TEST_HABIT_1})`;
       assert.fail('Should have rejected second session');
     } catch (err) {
       assert.ok(
@@ -554,12 +555,12 @@ async function testSingleActiveSession() {
     await setAuth(sql, 'user1@test.com');
 
     const [startResult] = await sql`
-      SELECT public.bloom_start_session('req-paused-1', ${TEST_HABIT_1}) AS r
+      SELECT public.bloom_start_session(${`req-paused-1-${TEST_RUN_ID}`}, ${TEST_HABIT_1}) AS r
     `;
-    await sql`SELECT public.bloom_pause_session('req-paused-2', ${startResult.r.session_id})`;
+    await sql`SELECT public.bloom_pause_session(${`req-paused-2-${TEST_RUN_ID}`}, ${startResult.r.session_id})`;
 
     try {
-      await sql`SELECT public.bloom_start_session('req-paused-3', ${TEST_HABIT_1})`;
+      await sql`SELECT public.bloom_start_session(${`req-paused-3-${TEST_RUN_ID}`}, ${TEST_HABIT_1})`;
       assert.fail('Should have rejected second session while paused');
     } catch (err) {
       assert.ok(
@@ -575,13 +576,13 @@ async function testSingleActiveSession() {
     await setAuth(sql, 'user1@test.com');
 
     const [startResult] = await sql`
-      SELECT public.bloom_start_session('req-after-1', ${TEST_HABIT_1}) AS r
+      SELECT public.bloom_start_session(${`req-after-1-${TEST_RUN_ID}`}, ${TEST_HABIT_1}) AS r
     `;
-    await sql`SELECT public.bloom_complete_session('req-after-2', ${startResult.r.session_id})`;
+    await sql`SELECT public.bloom_complete_session(${`req-after-2-${TEST_RUN_ID}`}, ${startResult.r.session_id})`;
 
     // Should succeed
     const [newStart] = await sql`
-      SELECT public.bloom_start_session('req-after-3', ${TEST_HABIT_1}) AS r
+      SELECT public.bloom_start_session(${`req-after-3-${TEST_RUN_ID}`}, ${TEST_HABIT_1}) AS r
     `;
     assert.ok(newStart.r.session_id, 'New session should start after completion');
   });
@@ -592,13 +593,13 @@ async function testSingleActiveSession() {
     await setAuth(sql, 'user1@test.com');
 
     const [startResult] = await sql`
-      SELECT public.bloom_start_session('req-cancel-1', ${TEST_HABIT_1}) AS r
+      SELECT public.bloom_start_session(${`req-cancel-1-${TEST_RUN_ID}`}, ${TEST_HABIT_1}) AS r
     `;
-    await sql`SELECT public.bloom_cancel_session('req-cancel-2', ${startResult.r.session_id})`;
+    await sql`SELECT public.bloom_cancel_session(${`req-cancel-2-${TEST_RUN_ID}`}, ${startResult.r.session_id})`;
 
     // Should succeed
     const [newStart] = await sql`
-      SELECT public.bloom_start_session('req-cancel-3', ${TEST_HABIT_1}) AS r
+      SELECT public.bloom_start_session(${`req-cancel-3-${TEST_RUN_ID}`}, ${TEST_HABIT_1}) AS r
     `;
     assert.ok(newStart.r.session_id, 'New session should start after cancellation');
   });
@@ -610,13 +611,13 @@ async function testSingleActiveSession() {
     // User 1 starts session
     await setAuth(sql, 'user1@test.com');
     const [user1Session] = await sql`
-      SELECT public.bloom_start_session('req-multi-1', ${TEST_HABIT_1}) AS r
+      SELECT public.bloom_start_session(${`req-multi-1-${TEST_RUN_ID}`}, ${TEST_HABIT_1}) AS r
     `;
 
     // User 2 starts session (different connection)
     await setAuth(sql2, 'user2@test.com');
     const [user2Session] = await sql2`
-      SELECT public.bloom_start_session('req-multi-2', ${TEST_HABIT_2}) AS r
+      SELECT public.bloom_start_session(${`req-multi-2-${TEST_RUN_ID}`}, ${TEST_HABIT_2}) AS r
     `;
 
     assert.ok(user1Session.r.session_id, 'User 1 should have session');
@@ -638,8 +639,8 @@ async function testConcurrency() {
 
     // Launch both simultaneously
     const results = await Promise.allSettled([
-      sql`SELECT public.bloom_start_session('req-race-1', ${TEST_HABIT_1}) AS r`,
-      sql2`SELECT public.bloom_start_session('req-race-2', ${TEST_HABIT_1}) AS r`
+      sql`SELECT public.bloom_start_session(${`req-race-1-${TEST_RUN_ID}`}, ${TEST_HABIT_1}) AS r`,
+      sql2`SELECT public.bloom_start_session(${`req-race-2-${TEST_RUN_ID}`}, ${TEST_HABIT_1}) AS r`
     ]);
 
     const fulfilled = results.filter(r => r.status === 'fulfilled');
@@ -713,9 +714,9 @@ async function testGoalImmutability() {
     const nextMonday = '2026-11-30';
 
     // Set goal three times
-    await sql`SELECT public.bloom_set_weekly_goal('req-g1', ${TEST_HABIT_1}, ${nextMonday}, 3)`;
-    await sql`SELECT public.bloom_set_weekly_goal('req-g2', ${TEST_HABIT_1}, ${nextMonday}, 5)`;
-    await sql`SELECT public.bloom_set_weekly_goal('req-g3', ${TEST_HABIT_1}, ${nextMonday}, 7)`;
+    await sql`SELECT public.bloom_set_weekly_goal(${`req-g1-${TEST_RUN_ID}`}, ${TEST_HABIT_1}, ${nextMonday}, 3)`;
+    await sql`SELECT public.bloom_set_weekly_goal(${`req-g2-${TEST_RUN_ID}`}, ${TEST_HABIT_1}, ${nextMonday}, 5)`;
+    await sql`SELECT public.bloom_set_weekly_goal(${`req-g3-${TEST_RUN_ID}`}, ${TEST_HABIT_1}, ${nextMonday}, 7)`;
 
     // All three versions should exist
     const versions = await sql`
