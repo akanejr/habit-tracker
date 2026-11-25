@@ -1,5 +1,6 @@
 "use client";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { Brand } from "@/components/brand";
 import { LogoutButton } from "@/components/auth/logout-button";
 import { createClient } from "@/lib/supabase/client";
@@ -126,7 +127,7 @@ export function TodayDashboard({ userId, displayName }: { userId: string; displa
   function openAdd() { setFormError(""); setEditor({ mode: "add" }); }
   function openEdit(habit: Habit) { setFormError(""); setEditor({ mode: "edit", habit }); }
   return <div className="today-app">
-    <header className="today-header"><Brand /><div className="today-header-right"><span className="header-date"><CalendarIcon /> {friendlyDate(day)}</span><LogoutButton /></div></header>
+    <header className="today-header"><Brand /><div className="today-header-right"><span className="header-date"><CalendarIcon /> {friendlyDate(day)}</span><Link href="/account" className="header-link">Account</Link><LogoutButton /></div></header>
     <main className="today-main">
       <div className="today-title-row"><div><p className="dash-eyebrow"><span className="dash-green-dot" /> YOUR SPACE TO GROW</p><h1>{greeting()}, <em>{firstName}.</em></h1><p className="today-subtitle">A little progress, every day. You’ve got this.</p></div><button className="button add-header" onClick={openAdd}><PlusIcon /> Add habit</button></div>
       <div className="today-date"><CalendarIcon /><span>{friendlyDate(day)}</span><span className="date-timezone">LAGOS TIME</span></div>

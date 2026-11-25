@@ -2,7 +2,6 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { createClient } from "@/lib/supabase/client";
 
 interface AccountDeletionProps {
   userId: string;
@@ -27,24 +26,33 @@ export function AccountDeletion({ userId, email }: AccountDeletionProps) {
     setError(null);
 
     try {
-      const supabase = createClient();
-
-      // Call the RPC function to delete application data
-      const { data, error: rpcError } = await supabase.rpc("delete_user_account", {
-        p_confirmation_text: confirmationText,
+      // Call the server-side API route (never expose service role key to client)
+      const response = await fetch("/api/account/delete", {
+        method: "DELETE",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ confirmation: confirmationText }),
       });
 
-      if (rpcError) {
-        throw new Error(rpcError.message);
+      const result = await response.json();
+
+      if (!response.ok) {
+        if (result.partialSuccess) {
+          // Database deletion succeeded, but Auth deletion failed
+          setError(
+            result.message ||
+              "Your account data has been deleted, but there was an issue deleting your authentication account. Please contact support."
+          );
+          setSuccess(true); // Still show success since data is deleted
+          return;
+        }
+        throw new Error(result.error || "Account deletion failed");
       }
 
-      const result = data as { success: boolean; message: string };
-      if (!result?.success) {
+      if (!result.success) {
         throw new Error("Account deletion failed");
       }
-
-      // Sign out the user
-      await supabase.auth.signOut();
 
       // Show success message
       setSuccess(true);
