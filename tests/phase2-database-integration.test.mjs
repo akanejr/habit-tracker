@@ -73,13 +73,25 @@ async function setAuth(conn, email) {
 
 // Helper to clean up test data
 async function cleanup() {
-  await sql`DELETE FROM public.session_command_requests WHERE user_id = ${TEST_USER_1} OR user_id = ${TEST_USER_2}`;
-  await sql`DELETE FROM public.habit_session_segments WHERE user_id = ${TEST_USER_1} OR user_id = ${TEST_USER_2}`;
-  await sql`DELETE FROM public.habit_sessions WHERE user_id = ${TEST_USER_1} OR user_id = ${TEST_USER_2}`;
-  await sql`DELETE FROM public.habit_session_goal_versions WHERE user_id = ${TEST_USER_1} OR user_id = ${TEST_USER_2}`;
-  await sql`DELETE FROM public.habit_versions WHERE user_id = ${TEST_USER_1} OR user_id = ${TEST_USER_2}`;
-  await sql`DELETE FROM public.habit_logs WHERE user_id = ${TEST_USER_1} OR user_id = ${TEST_USER_2}`;
-  await sql`DELETE FROM public.habits WHERE user_id = ${TEST_USER_1} OR user_id = ${TEST_USER_2}`;
+  // Clean up user1's data with user1's auth context
+  await setAuth(sql, 'user1@test.com');
+  await sql`DELETE FROM public.session_command_requests WHERE user_id = ${TEST_USER_1}`;
+  await sql`DELETE FROM public.habit_session_segments WHERE user_id = ${TEST_USER_1}`;
+  await sql`DELETE FROM public.habit_sessions WHERE user_id = ${TEST_USER_1}`;
+  await sql`DELETE FROM public.habit_session_goal_versions WHERE user_id = ${TEST_USER_1}`;
+  await sql`DELETE FROM public.habit_versions WHERE user_id = ${TEST_USER_1}`;
+  await sql`DELETE FROM public.habit_logs WHERE user_id = ${TEST_USER_1}`;
+  await sql`DELETE FROM public.habits WHERE user_id = ${TEST_USER_1}`;
+  
+  // Clean up user2's data with user2's auth context
+  await setAuth(sql2, 'user2@test.com');
+  await sql2`DELETE FROM public.session_command_requests WHERE user_id = ${TEST_USER_2}`;
+  await sql2`DELETE FROM public.habit_session_segments WHERE user_id = ${TEST_USER_2}`;
+  await sql2`DELETE FROM public.habit_sessions WHERE user_id = ${TEST_USER_2}`;
+  await sql2`DELETE FROM public.habit_session_goal_versions WHERE user_id = ${TEST_USER_2}`;
+  await sql2`DELETE FROM public.habit_versions WHERE user_id = ${TEST_USER_2}`;
+  await sql2`DELETE FROM public.habit_logs WHERE user_id = ${TEST_USER_2}`;
+  await sql2`DELETE FROM public.habits WHERE user_id = ${TEST_USER_2}`;
 }
 
 // Helper to create test data
@@ -593,13 +605,13 @@ async function testSingleActiveSession() {
     await setAuth(sql, 'user1@test.com');
 
     const [startResult] = await sql`
-      SELECT public.bloom_start_session(${`req-cancel-1-${TEST_RUN_ID}`}, ${TEST_HABIT_1}) AS r
+      SELECT public.bloom_start_session(${`req-aftercancel-1-${TEST_RUN_ID}`}, ${TEST_HABIT_1}) AS r
     `;
-    await sql`SELECT public.bloom_cancel_session(${`req-cancel-2-${TEST_RUN_ID}`}, ${startResult.r.session_id})`;
+    await sql`SELECT public.bloom_cancel_session(${`req-aftercancel-2-${TEST_RUN_ID}`}, ${startResult.r.session_id})`;
 
     // Should succeed
     const [newStart] = await sql`
-      SELECT public.bloom_start_session(${`req-cancel-3-${TEST_RUN_ID}`}, ${TEST_HABIT_1}) AS r
+      SELECT public.bloom_start_session(${`req-aftercancel-3-${TEST_RUN_ID}`}, ${TEST_HABIT_1}) AS r
     `;
     assert.ok(newStart.r.session_id, 'New session should start after cancellation');
   });
@@ -684,8 +696,8 @@ async function testConcurrency() {
 
     // Both try to set goal for same week
     const results = await Promise.allSettled([
-      sql`SELECT public.bloom_set_weekly_goal('req-goal-1', ${TEST_HABIT_1}, ${nextMonday}, 5) AS r`,
-      sql2`SELECT public.bloom_set_weekly_goal('req-goal-2', ${TEST_HABIT_1}, ${nextMonday}, 7) AS r`
+      sql`SELECT public.bloom_set_weekly_goal(${`req-goal-1-${TEST_RUN_ID}`}, ${TEST_HABIT_1}, ${nextMonday}, 5) AS r`,
+      sql2`SELECT public.bloom_set_weekly_goal(${`req-goal-2-${TEST_RUN_ID}`}, ${TEST_HABIT_1}, ${nextMonday}, 7) AS r`
     ]);
 
     // Both should succeed (different request_ids = different operations)
@@ -746,7 +758,7 @@ async function testGoalImmutability() {
     const [active] = await sql`
       SELECT * FROM public.get_active_goal(${TEST_HABIT_1}, ${nextMonday})
     `;
-    assert.strictEqual(active.weekly_target, 7, 'Should return latest version (7)');
+    assert.strictEqual(active.weekly_session_target, 7, 'Should return latest version (7)');
   });
 
   await test('NULL target (no goal) is preserved', async () => {
@@ -762,7 +774,7 @@ async function testGoalImmutability() {
     const [active] = await sql`
       SELECT * FROM public.get_active_goal(${TEST_HABIT_1}, ${nextMonday})
     `;
-    assert.strictEqual(active.weekly_target, null, 'NULL target should be preserved');
+    assert.strictEqual(active.weekly_session_target, null, 'NULL target should be preserved');
   });
 
   await test('targets greater than 7 are allowed', async () => {
@@ -778,7 +790,7 @@ async function testGoalImmutability() {
     const [active] = await sql`
       SELECT * FROM public.get_active_goal(${TEST_HABIT_1}, ${nextMonday})
     `;
-    assert.strictEqual(active.weekly_target, 14, 'Target > 7 should be allowed');
+    assert.strictEqual(active.weekly_session_target, 14, 'Target > 7 should be allowed');
   });
 
   await test('effective_week must be Monday', async () => {
@@ -813,13 +825,13 @@ async function testGoalImmutability() {
     const [week1Goal] = await sql`
       SELECT * FROM public.get_active_goal(${TEST_HABIT_1}, ${week1})
     `;
-    assert.strictEqual(week1Goal.weekly_target, 4);
+    assert.strictEqual(week1Goal.weekly_session_target, 4);
 
     // Week 2 should still be 5
     const [week2Goal] = await sql`
       SELECT * FROM public.get_active_goal(${TEST_HABIT_1}, ${week2})
     `;
-    assert.strictEqual(week2Goal.weekly_target, 5);
+    assert.strictEqual(week2Goal.weekly_session_target, 5);
 
     // Verify all versions preserved
     const allVersions = await sql`

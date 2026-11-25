@@ -585,6 +585,12 @@ BEGIN
     RAISE EXCEPTION 'Habit not found or not active';
   END IF;
 
+  IF p_duration_ms < 0 THEN
+    DELETE FROM public.session_command_requests
+    WHERE request_id = p_request_id AND user_id = v_user_id AND operation_type = 'quick_log';
+    RAISE EXCEPTION 'Duration must be non-negative';
+  END IF;
+
   SELECT id INTO v_version_id
   FROM public.habit_versions
   WHERE habit_id = p_habit_id
