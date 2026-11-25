@@ -422,8 +422,7 @@ BEGIN
     status = 'completed',
     completed_at = v_now,
     duration_ms = v_duration_ms,
-    completion_version_id = v_version_id,
-    updated_at = v_now
+    completion_version_id = v_version_id
   WHERE id = p_session_id;
 
   v_result := jsonb_build_object(
