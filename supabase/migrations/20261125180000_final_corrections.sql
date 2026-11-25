@@ -269,6 +269,7 @@ DECLARE
   v_payload jsonb;
   v_existing record;
   v_session record;
+  v_segment_id bigint;
 BEGIN
   SELECT auth.uid() INTO v_user_id;
   IF v_user_id IS NULL THEN
@@ -320,10 +321,11 @@ BEGIN
     session_id, user_id, started_at
   ) VALUES (
     p_session_id, v_user_id, v_now
-  );
+  ) RETURNING id INTO v_segment_id;
 
   v_result := jsonb_build_object(
     'session_id', p_session_id,
+    'segment_id', v_segment_id,
     'status', 'running',
     'resumed_at', v_now
   );
@@ -603,7 +605,7 @@ BEGIN
     'session_id', v_session_id,
     'status', 'completed',
     'completed_at', v_now,
-    'duration_ms', p_duration_ms
+    'estimated_ms', p_duration_ms
   );
 
   UPDATE public.session_command_requests
