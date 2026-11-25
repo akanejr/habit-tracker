@@ -88,7 +88,7 @@
 .bloom-main {
   max-width: 820px;
   margin: auto;
-  padding: 32px 24px 48px;
+  padding: 32px 24px 80px;
 }
 
 .bloom-main h1 {
@@ -552,34 +552,51 @@
   right: 0;
   z-index: 10;
   display: flex;
-  justify-content: center;
-  gap: 4px;
+  width: 100%;
   background: var(--panel);
   border-top: 1px solid var(--line);
-  padding: 6px 12px max(8px, env(safe-area-inset-bottom));
+  padding: 0 0 max(4px, env(safe-area-inset-bottom));
+  box-shadow: 0 -1px 3px rgba(0, 0, 0, 0.04);
 }
 
 .bloom-nav button {
-  min-width: 72px;
+  flex: 1;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 4px;
+  gap: 5px;
   border: none;
   background: transparent;
-  padding: 8px 14px;
-  font-size: 10px;
-  font-weight: 600;
+  padding: 10px 8px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
   color: var(--muted);
-  border-radius: 8px;
-  transition: color 0.15s, background 0.15s;
-  min-height: 44px;
+  border-radius: 0;
+  transition: color 0.2s ease, background 0.2s ease;
+  min-height: 48px;
+  position: relative;
+}
+
+.bloom-nav button::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 0;
+  height: 2px;
+  background: var(--accent);
+  transition: width 0.2s ease;
 }
 
 .bloom-nav button svg {
   width: 20px;
   height: 20px;
+  stroke-width: 1.6;
+  transition: stroke-width 0.2s ease;
 }
 
 .bloom-nav button:hover {
@@ -587,10 +604,17 @@
   background: var(--surface-raised);
 }
 
+.bloom-nav button:active {
+  background: var(--line);
+}
+
 .bloom-nav button[aria-current="page"] {
   color: var(--accent);
-  background: var(--surface-raised);
-  font-weight: 700;
+  font-weight: 600;
+}
+
+.bloom-nav button[aria-current="page"]::before {
+  width: 24px;
 }
 
 .bloom-nav button[aria-current="page"] svg {
@@ -898,14 +922,18 @@
   }
 
   .bloom-nav {
-    padding: 4px 8px max(6px, env(safe-area-inset-bottom));
-    gap: 2px;
+    padding: 0 0 max(2px, env(safe-area-inset-bottom));
   }
 
   .bloom-nav button {
-    min-width: 64px;
-    padding: 6px 10px;
-    font-size: 9px;
+    padding: 8px 6px;
+    font-size: 10px;
+    min-height: 44px;
+  }
+
+  .bloom-nav button svg {
+    width: 18px;
+    height: 18px;
   }
 
   .bloom-timer-actions button {
