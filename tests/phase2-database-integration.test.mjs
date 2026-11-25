@@ -656,14 +656,15 @@ async function testConcurrency() {
     await setAuth(sql, 'user1@test.com');
     await setAuth(sql2, 'user1@test.com');
 
+    const suffix = Date.now();
     const [startResult] = await sql`
-      SELECT public.bloom_start_session('req-pc-1', ${TEST_HABIT_1}) AS r
+      SELECT public.bloom_start_session(${`req-pc-start-${suffix}`}, ${TEST_HABIT_1}) AS r
     `;
 
     // Try to pause and complete simultaneously
     const results = await Promise.allSettled([
-      sql`SELECT public.bloom_pause_session('req-pc-2', ${startResult.r.session_id}) AS r`,
-      sql2`SELECT public.bloom_complete_session('req-pc-3', ${startResult.r.session_id}) AS r`
+      sql`SELECT public.bloom_pause_session(${`req-pc-pause-${suffix}`}, ${startResult.r.session_id}) AS r`,
+      sql2`SELECT public.bloom_complete_session(${`req-pc-complete-${suffix}`}, ${startResult.r.session_id}) AS r`
     ]);
 
     const fulfilled = results.filter(r => r.status === 'fulfilled');
@@ -735,10 +736,11 @@ async function testGoalImmutability() {
     await setAuth(sql, 'user1@test.com');
 
     const nextMonday = '2026-11-30';
+    const suffix = Date.now();
 
-    await sql`SELECT public.bloom_set_weekly_goal('req-ag1', ${TEST_HABIT_1}, ${nextMonday}, 3)`;
-    await sql`SELECT public.bloom_set_weekly_goal('req-ag2', ${TEST_HABIT_1}, ${nextMonday}, 5)`;
-    await sql`SELECT public.bloom_set_weekly_goal('req-ag3', ${TEST_HABIT_1}, ${nextMonday}, 7)`;
+    await sql`SELECT public.bloom_set_weekly_goal(${`req-ag1-${suffix}`}, ${TEST_HABIT_1}, ${nextMonday}, 3)`;
+    await sql`SELECT public.bloom_set_weekly_goal(${`req-ag2-${suffix}`}, ${TEST_HABIT_1}, ${nextMonday}, 5)`;
+    await sql`SELECT public.bloom_set_weekly_goal(${`req-ag3-${suffix}`}, ${TEST_HABIT_1}, ${nextMonday}, 7)`;
 
     const [active] = await sql`
       SELECT * FROM public.get_active_goal(${TEST_HABIT_1}, ${nextMonday})
@@ -752,8 +754,9 @@ async function testGoalImmutability() {
     await setAuth(sql, 'user1@test.com');
 
     const nextMonday = '2026-11-30';
+    const suffix = Date.now();
 
-    await sql`SELECT public.bloom_set_weekly_goal('req-null1', ${TEST_HABIT_1}, ${nextMonday}, NULL)`;
+    await sql`SELECT public.bloom_set_weekly_goal(${`req-null1-${suffix}`}, ${TEST_HABIT_1}, ${nextMonday}, NULL)`;
 
     const [active] = await sql`
       SELECT * FROM public.get_active_goal(${TEST_HABIT_1}, ${nextMonday})
@@ -767,8 +770,9 @@ async function testGoalImmutability() {
     await setAuth(sql, 'user1@test.com');
 
     const nextMonday = '2026-11-30';
+    const suffix = Date.now();
 
-    await sql`SELECT public.bloom_set_weekly_goal('req-high1', ${TEST_HABIT_1}, ${nextMonday}, 14)`;
+    await sql`SELECT public.bloom_set_weekly_goal(${`req-high1-${suffix}`}, ${TEST_HABIT_1}, ${nextMonday}, 14)`;
 
     const [active] = await sql`
       SELECT * FROM public.get_active_goal(${TEST_HABIT_1}, ${nextMonday})
@@ -796,12 +800,13 @@ async function testGoalImmutability() {
 
     const week1 = '2026-11-16';
     const week2 = '2026-11-23';
+    const suffix = Date.now();
 
-    await sql`SELECT public.bloom_set_weekly_goal('req-hist1', ${TEST_HABIT_1}, ${week1}, 3)`;
-    await sql`SELECT public.bloom_set_weekly_goal('req-hist2', ${TEST_HABIT_1}, ${week2}, 5)`;
+    await sql`SELECT public.bloom_set_weekly_goal(${`req-hist1-${suffix}`}, ${TEST_HABIT_1}, ${week1}, 3)`;
+    await sql`SELECT public.bloom_set_weekly_goal(${`req-hist2-${suffix}`}, ${TEST_HABIT_1}, ${week2}, 5)`;
 
     // Change week1 goal (new version, doesn't overwrite)
-    await sql`SELECT public.bloom_set_weekly_goal('req-hist3', ${TEST_HABIT_1}, ${week1}, 4)`;
+    await sql`SELECT public.bloom_set_weekly_goal(${`req-hist3-${suffix}`}, ${TEST_HABIT_1}, ${week1}, 4)`;
 
     // Week 1 should return latest version (4)
     const [week1Goal] = await sql`
@@ -875,7 +880,8 @@ async function testIdempotency() {
     const sessions = await sql`
       SELECT id FROM public.habit_sessions WHERE user_id = ${TEST_USER_1} AND status = 'running'
     `;
-    await sql`SELECT public.bloom_complete_session('complete-diff', ${sessions[0].id})`;
+    const suffix2 = Date.now();
+    await sql`SELECT public.bloom_complete_session(${`complete-diff-${suffix2}`}, ${sessions[0].id})`;
 
     // Try to start with same request_id but different habit (different payload)
     try {
@@ -946,34 +952,35 @@ async function testIdempotency() {
     await setupTestData();
     await setAuth(sql, 'user1@test.com');
 
+    const suffix = Date.now();
     const [startResult] = await sql`
-      SELECT public.bloom_start_session('idem-lifecycle-start', ${TEST_HABIT_1}) AS r
+      SELECT public.bloom_start_session(${`idem-lifecycle-start-${suffix}`}, ${TEST_HABIT_1}) AS r
     `;
 
     // Pause twice with same request_id
     const [pause1] = await sql`
-      SELECT public.bloom_pause_session('idem-pause', ${startResult.r.session_id}) AS r
+      SELECT public.bloom_pause_session(${`idem-pause-${suffix}`}, ${startResult.r.session_id}) AS r
     `;
     const [pause2] = await sql`
-      SELECT public.bloom_pause_session('idem-pause', ${startResult.r.session_id}) AS r
+      SELECT public.bloom_pause_session(${`idem-pause-${suffix}`}, ${startResult.r.session_id}) AS r
     `;
     assert.strictEqual(pause2.r.session_id, pause1.r.session_id, 'Pause should be idempotent');
 
     // Resume twice with same request_id
     const [resume1] = await sql`
-      SELECT public.bloom_resume_session('idem-resume', ${startResult.r.session_id}) AS r
+      SELECT public.bloom_resume_session(${`idem-resume-${suffix}`}, ${startResult.r.session_id}) AS r
     `;
     const [resume2] = await sql`
-      SELECT public.bloom_resume_session('idem-resume', ${startResult.r.session_id}) AS r
+      SELECT public.bloom_resume_session(${`idem-resume-${suffix}`}, ${startResult.r.session_id}) AS r
     `;
     assert.strictEqual(resume2.r.session_id, resume1.r.session_id, 'Resume should be idempotent');
 
     // Complete twice with same request_id
     const [complete1] = await sql`
-      SELECT public.bloom_complete_session('idem-complete', ${startResult.r.session_id}) AS r
+      SELECT public.bloom_complete_session(${`idem-complete-${suffix}`}, ${startResult.r.session_id}) AS r
     `;
     const [complete2] = await sql`
-      SELECT public.bloom_complete_session('idem-complete', ${startResult.r.session_id}) AS r
+      SELECT public.bloom_complete_session(${`idem-complete-${suffix}`}, ${startResult.r.session_id}) AS r
     `;
     assert.strictEqual(complete2.r.session_id, complete1.r.session_id, 'Complete should be idempotent');
   });
