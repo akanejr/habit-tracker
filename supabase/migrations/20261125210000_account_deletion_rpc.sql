@@ -15,7 +15,7 @@ BEGIN
     RAISE EXCEPTION 'Not authenticated';
   END IF;
 
-  IF p_confirmation_text != '
+  IF p_confirmation_text != 'DELETE MY ACCOUNT' THEN
     RAISE EXCEPTION 'Invalid confirmation';
   END IF;
 

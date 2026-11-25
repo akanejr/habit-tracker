@@ -17,8 +17,8 @@ export function AccountDeletion({ userId, email }: AccountDeletionProps) {
   const [success, setSuccess] = useState(false);
 
   const handleDeleteAccount = async () => {
-    if (confirmationText !== "DELETE") {
-      setError('Please type "DELETE" to confirm account deletion.');
+    if (confirmationText !== "DELETE MY ACCOUNT") {
+      setError('Please type "DELETE MY ACCOUNT" to confirm account deletion.');
       return;
     }
 
@@ -40,11 +40,11 @@ export function AccountDeletion({ userId, email }: AccountDeletionProps) {
       if (!response.ok) {
         if (result.partialSuccess) {
           // Database deletion succeeded, but Auth deletion failed
+          // Recovery mechanism is automatically scheduled
           setError(
-            result.message ||
-              "Your account data has been deleted, but there was an issue deleting your authentication account. Please contact support."
+            "Your account data has been deleted. Authentication deletion is being retried automatically. You will receive confirmation when complete."
           );
-          setSuccess(true); // Still show success since data is deleted
+          setSuccess(true);
           return;
         }
         throw new Error(result.error || "Account deletion failed");
@@ -123,7 +123,7 @@ export function AccountDeletion({ userId, email }: AccountDeletionProps) {
               type="text"
               value={confirmationText}
               onChange={(e) => setConfirmationText(e.target.value)}
-              placeholder="Type DELETE to confirm"
+              placeholder="Type DELETE MY ACCOUNT to confirm"
               className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded focus:outline-none focus:ring-2 focus:ring-red-500 dark:bg-gray-700 dark:text-gray-100"
               disabled={isDeleting}
             />

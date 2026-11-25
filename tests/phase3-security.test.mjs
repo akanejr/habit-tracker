@@ -240,7 +240,7 @@ async function runTests() {
     await sql.unsafe('RESET app.current_user_email');
     
     try {
-      await sql`SELECT public.delete_user_account('DELETE')`;
+      await sql`SELECT public.delete_user_account('DELETE MY ACCOUNT')`;
       throw new Error('Should have rejected unauthenticated deletion');
     } catch (err) {
       if (!err.message.includes('Not authenticated')) {
@@ -280,7 +280,7 @@ async function runTests() {
     }
     
     // Delete account
-    const [result] = await sql`SELECT public.delete_user_account('DELETE')`;
+    const [result] = await sql`SELECT public.delete_user_account('DELETE MY ACCOUNT')`;
     
     if (!result.delete_user_account.success) {
       throw new Error('Account deletion failed');
@@ -313,7 +313,7 @@ async function runTests() {
     await sql`SELECT public.bloom_quick_log(${`req-del-2-${TEST_RUN_ID}`}, ${TEST_HABIT_1}, 1800000, 'Test log')`;
     
     // Delete account
-    await sql`SELECT public.delete_user_account('DELETE')`;
+    await sql`SELECT public.delete_user_account('DELETE MY ACCOUNT')`;
     
     // Verify all tables are empty for this user
     const tables = [
@@ -410,3 +410,127 @@ runTests().catch(err => {
   console.error('Fatal error:', err);
   process.exit(1);
 });
+
+  // Test 13: Incomplete deletion is recorded
+  total++;
+  if (await test('Incomplete deletion is recorded when Auth deletion fails', async () => {
+    await setupTestData();
+    await setAuth(sql, 'user1@test.com');
+    
+    // Delete account (will fail at Auth step in test environment)
+    await sql`SELECT public.delete_user_account('DELETE MY ACCOUNT')`;
+    
+    // Record incomplete deletion
+    await sql`SELECT public.record_incomplete_deletion(${TEST_USER_1}, 'user1@test.com', 'Test error')`;
+    
+    // Verify it was recorded
+    const [record] = await sql`
+      SELECT id, user_id, resolved FROM public.incomplete_deletions
+      WHERE user_id = ${TEST_USER_1} AND resolved = false
+    `;
+    
+    if (!record) {
+      throw new Error('Incomplete deletion not recorded');
+    }
+  })) passed++;
+
+  // Test 14: Recovery mechanism can retry incomplete deletions
+  total++;
+  if (await test('Recovery mechanism can fetch pending deletions', async () => {
+    await setupTestData();
+    
+    // Create an incomplete deletion record
+    await sql.unsafe('SET ROLE service_role');
+    await sql`SELECT public.record_incomplete_deletion(${TEST_USER_1}, 'user1@test.com', 'Test error')`;
+    
+    // Fetch pending deletions
+    const [result] = await sql`SELECT public.retry_incomplete_deletions()`;
+    
+    if (!result.retry_incomplete_deletions) {
+      throw new Error('Recovery function failed');
+    }
+    
+    const pending = result.retry_incomplete_deletions.pending_deletions;
+    if (!pending || pending.length === 0) {
+      throw new Error('No pending deletions found');
+    }
+  })) passed++;
+
+  // Test 15: Resolved deletions are marked correctly
+  total++;
+  if (await test('Resolved deletions are marked correctly', async () => {
+    await setupTestData();
+    
+    // Create an incomplete deletion
+    await sql.unsafe('SET ROLE service_role');
+    const [record] = await sql`
+      SELECT public.record_incomplete_deletion(${TEST_USER_1}, 'user1@test.com', 'Test error') AS id
+    `;
+    
+    // Mark as resolved
+    await sql`SELECT public.mark_deletion_resolved(${record.id})`;
+    
+    // Verify it's resolved
+    const [check] = await sql`
+      SELECT resolved, resolved_at FROM public.incomplete_deletions WHERE id = ${record.id}
+    `;
+    
+    if (!check.resolved) {
+      throw new Error('Deletion not marked as resolved');
+    }
+    
+    if (!check.resolved_at) {
+      throw new Error('resolved_at not set');
+    }
+  })) passed++;
+
+  // Test 16: Attempt counter increments correctly
+  total++;
+  if (await test('Attempt counter increments correctly', async () => {
+    await setupTestData();
+    
+    // Create an incomplete deletion
+    await sql.unsafe('SET ROLE service_role');
+    const [record] = await sql`
+      SELECT public.record_incomplete_deletion(${TEST_USER_1}, 'user1@test.com', 'Test error') AS id
+    `;
+    
+    // Increment attempt
+    await sql`SELECT public.increment_deletion_attempt(${record.id})`;
+    
+    // Verify counter
+    const [check] = await sql`
+      SELECT auth_deletion_attempts FROM public.incomplete_deletions WHERE id = ${record.id}
+    `;
+    
+    if (check.auth_deletion_attempts !== 2) {
+      throw new Error(`Expected 2 attempts, got ${check.auth_deletion_attempts}`);
+    }
+  })) passed++;
+
+  // Test 17: Cannot delete another user's account
+  total++;
+  if (await test('Cannot delete another user\'s account', async () => {
+    await setupTestData();
+    await setAuth(sql, 'user1@test.com');
+    
+    // Try to delete user2's account (should only delete user1's data)
+    const [result] = await sql`SELECT public.delete_user_account('DELETE MY ACCOUNT')`;
+    
+    // Verify only user1's data was deleted
+    const [user1Habits] = await sql`
+      SELECT COUNT(*)::int as cnt FROM public.habits WHERE user_id = ${TEST_USER_1}
+    `;
+    const [user2Habits] = await sql2`
+      SELECT COUNT(*)::int as cnt FROM public.habits WHERE user_id = ${TEST_USER_2}
+    `;
+    
+    if (user1Habits.cnt !== 0) {
+      throw new Error('User1 habits not deleted');
+    }
+    
+    if (user2Habits.cnt === 0) {
+      throw new Error('User2 habits were deleted (should not be)');
+    }
+  })) passed++;
+
