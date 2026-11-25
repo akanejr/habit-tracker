@@ -414,6 +414,16 @@ export interface Database {
           effective_week: string;
         }[];
       };
+      delete_user_account: {
+        Args: { p_confirmation_text: string };
+        Returns: {
+          success: boolean;
+          user_id: string;
+          deleted_counts: Record<string, number>;
+          total_deleted: number;
+          message: string;
+        };
+      };
     };
     Enums: Record<string, never>;
     CompositeTypes: Record<string, never>;
