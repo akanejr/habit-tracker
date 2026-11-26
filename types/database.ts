@@ -414,6 +414,44 @@ export interface Database {
           effective_week: string;
         }[];
       };
+      delete_user_account: {
+        Args: { p_confirmation_text: string };
+        Returns: {
+          success: boolean;
+          user_id: string;
+          deleted_counts: Record<string, number>;
+          total_deleted: number;
+          message: string;
+        };
+      };
+      record_incomplete_deletion: {
+        Args: {
+          p_user_id: string;
+          p_user_email: string;
+          p_error: string | null;
+        };
+        Returns: number;
+      };
+      retry_incomplete_deletions: {
+        Args: {};
+        Returns: {
+          id: number;
+          user_id: string;
+          user_email: string;
+          database_deleted_at: string;
+          auth_deletion_attempts: number;
+          last_attempt_at: string;
+          last_error: string | null;
+        }[];
+      };
+      mark_deletion_resolved: {
+        Args: { p_deletion_id: number };
+        Returns: void;
+      };
+      increment_deletion_attempt: {
+        Args: { p_deletion_id: number };
+        Returns: void;
+      };
     };
     Enums: Record<string, never>;
     CompositeTypes: Record<string, never>;
