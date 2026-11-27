@@ -156,10 +156,21 @@ GRANT EXECUTE ON FUNCTION public.bloom_snapshot_user_data(text) TO authenticated
 
 -- ============================================================================
 -- RESTORE FUNCTION (service_role only)
+--
+-- AUTHORIZATION DESIGN:
+--   - EXECUTE is granted ONLY to service_role (revoked from authenticated/PUBLIC)
+--   - Does NOT rely on auth.uid() — service_role requests have no user JWT
+--   - Caller must provide p_target_user_id explicitly
+--   - Validates snapshot belongs to p_target_user_id before restoring
+--   - p_force controls whether existing data is overwritten
+--
+-- In a real deployment, this function is called from trusted server-side code
+-- (API routes, Edge Functions) that authenticates with the service_role key.
 -- ============================================================================
 
 CREATE OR REPLACE FUNCTION public.bloom_restore_user_data(
   p_snapshot_id bigint,
+  p_target_user_id uuid,
   p_force boolean DEFAULT false
 )
 RETURNS void
@@ -169,25 +180,15 @@ SET search_path = ''
 AS $$
 DECLARE
   v_snapshot record;
-  v_caller_id uuid;
   v_current_count integer;
   v_item jsonb;
 BEGIN
-  -- Auth check: verify caller is authenticated
-  v_caller_id := (SELECT auth.uid());
-  IF v_caller_id IS NULL THEN
-    RAISE EXCEPTION 'Not authenticated — restore requires authentication';
+  -- Validate inputs
+  IF p_target_user_id IS NULL THEN
+    RAISE EXCEPTION 'p_target_user_id is required';
   END IF;
 
-  -- Role check: p_force requires service_role
-  IF p_force THEN
-    IF current_setting('role', true) IS DISTINCT FROM 'service_role' THEN
-      RAISE EXCEPTION 'p_force = true requires service_role. '
-        'Authenticated users cannot force-restore over existing data.';
-    END IF;
-  END IF;
-
-  -- Fetch snapshot and validate ownership
+  -- Fetch snapshot
   SELECT id, user_id, snapshot_data, created_at
   INTO v_snapshot
   FROM public.user_data_snapshots
@@ -197,19 +198,21 @@ BEGIN
     RAISE EXCEPTION 'Snapshot % not found', p_snapshot_id;
   END IF;
 
-  IF v_snapshot.user_id != v_caller_id THEN
-    RAISE EXCEPTION 'Access denied: snapshot belongs to a different user';
+  -- Validate snapshot belongs to the target user
+  IF v_snapshot.user_id != p_target_user_id THEN
+    RAISE EXCEPTION 'Access denied: snapshot % belongs to user %, not target user %',
+      p_snapshot_id, v_snapshot.user_id, p_target_user_id;
   END IF;
 
   -- Safety check: error if current data exists and p_force is false
   IF NOT p_force THEN
     SELECT COUNT(*) INTO v_current_count
     FROM public.habits
-    WHERE user_id = v_snapshot.user_id;
+    WHERE user_id = p_target_user_id;
 
     IF v_current_count > 0 THEN
       RAISE EXCEPTION
-        'User has % existing habits. Set p_force = true to overwrite (service_role only). '
+        'Target user has % existing habits. Set p_force = true to overwrite. '
         'Snapshot was taken at %.',
         v_current_count, v_snapshot.created_at;
     END IF;
@@ -218,22 +221,14 @@ BEGIN
   -- ========================================================================
   -- DELETE existing data (reverse FK order to avoid constraint violations)
   -- ========================================================================
-  -- session_command_requests → habit_id (no FK to sessions)
-  DELETE FROM public.session_command_requests WHERE user_id = v_snapshot.user_id;
-  -- segments cascade from sessions
-  DELETE FROM public.habit_session_goal_versions WHERE user_id = v_snapshot.user_id;
-  -- habit_sessions cascade-deletes segments
-  DELETE FROM public.habit_sessions WHERE user_id = v_snapshot.user_id;
-  -- habit_versions has FK to habits
-  DELETE FROM public.habit_versions WHERE user_id = v_snapshot.user_id;
-  -- incomplete_deletions (no FK dependencies)
-  DELETE FROM public.incomplete_deletions WHERE user_id = v_snapshot.user_id;
-  -- habit_logs cascade from habits
-  DELETE FROM public.habit_logs WHERE user_id = v_snapshot.user_id;
-  -- habits (references auth.users, not profiles directly)
-  DELETE FROM public.habits WHERE user_id = v_snapshot.user_id;
-  -- profiles (references auth.users)
-  DELETE FROM public.profiles WHERE id = v_snapshot.user_id;
+  DELETE FROM public.session_command_requests WHERE user_id = p_target_user_id;
+  DELETE FROM public.habit_session_goal_versions WHERE user_id = p_target_user_id;
+  DELETE FROM public.habit_sessions WHERE user_id = p_target_user_id;
+  DELETE FROM public.habit_versions WHERE user_id = p_target_user_id;
+  DELETE FROM public.incomplete_deletions WHERE user_id = p_target_user_id;
+  DELETE FROM public.habit_logs WHERE user_id = p_target_user_id;
+  DELETE FROM public.habits WHERE user_id = p_target_user_id;
+  DELETE FROM public.profiles WHERE id = p_target_user_id;
 
   -- ========================================================================
   -- INSERT from snapshot (FK order: parents first)
@@ -413,13 +408,15 @@ END;
 $$;
 
 COMMENT ON FUNCTION public.bloom_restore_user_data IS
-  'Restores user data from a snapshot. Validates ownership, respects FK ordering, '
-  'errors if newer data exists unless p_force = true. SECURITY DEFINER — restricted to service_role.';
+  'Restores user data from a snapshot. Service-role only. '
+  'Caller must provide p_target_user_id explicitly (no auth.uid() dependency). '
+  'Validates snapshot belongs to target user. Respects FK ordering. '
+  'Errors if existing data found unless p_force = true.';
 
 -- Restore is privileged: revoke from regular users, grant explicitly to service_role
-REVOKE ALL PRIVILEGES ON FUNCTION public.bloom_restore_user_data(bigint, boolean)
+REVOKE ALL PRIVILEGES ON FUNCTION public.bloom_restore_user_data(bigint, uuid, boolean)
   FROM PUBLIC, anon, authenticated;
-GRANT EXECUTE ON FUNCTION public.bloom_restore_user_data(bigint, boolean)
+GRANT EXECUTE ON FUNCTION public.bloom_restore_user_data(bigint, uuid, boolean)
   TO service_role;
 
 COMMIT;

@@ -5,11 +5,13 @@
 --   - Destructive operations (complete_session, cancel_session, delete_account)
 --     are NOT auto-retried (auto_retryable = false).
 --   - Only idempotent operations (start_session, set_weekly_goal) are retryable.
---   - Exponential backoff: retry delays double after each attempt (1m, 2m, 4m, 8m, 16m).
---   - Bounded by max_attempts (default 5). Failed operations beyond max are marked
---     'exhausted' and will not be retried.
---   - retry_failed_operations() returns pending failures for processing; it does NOT
---     execute the operations itself. The caller decides what to do with them.
+--   - Exponential backoff: retry delays double after each attempt.
+--   - Bounded by max_attempts (default 5). Failures are marked 'exhausted' only
+--     after ALL permitted attempts have been delivered and the final attempt
+--     has not been resolved.
+--   - retry_failed_operations() atomically claims failures using FOR UPDATE SKIP LOCKED
+--     and returns ONLY the IDs claimed by the current invocation.
+--   - Abandoned claims (worker crash) are recovered after a 5-minute lease timeout.
 --
 -- RELATIONSHIP TO EXISTING SYSTEMS:
 --   - session_command_requests: Provides idempotency (prevents duplicate execution)
@@ -28,38 +30,43 @@ CREATE TABLE public.operation_failures (
   operation_type text NOT NULL,
   payload jsonb NOT NULL DEFAULT '{}'::jsonb,
   error_message text,
-  attempt_count integer NOT NULL DEFAULT 1,
+  attempt_count integer NOT NULL DEFAULT 0,
   max_attempts integer NOT NULL DEFAULT 5
     CHECK (max_attempts >= 1 AND max_attempts <= 10),
   status text NOT NULL DEFAULT 'pending'
     CHECK (status IN ('pending', 'retrying', 'resolved', 'exhausted', 'not_retryable')),
   next_retry_at timestamptz NOT NULL DEFAULT now(),
   auto_retryable boolean NOT NULL DEFAULT false,
+  claimed_at timestamptz,
   resolved_at timestamptz,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now()
 );
 
 COMMENT ON TABLE public.operation_failures IS
-  'General-purpose failure tracking with bounded retry and exponential backoff';
+  'General-purpose failure tracking with bounded retry, exponential backoff, and lease-based claiming';
+COMMENT ON COLUMN public.operation_failures.attempt_count IS
+  'Number of attempts delivered to workers (0 = never claimed)';
 COMMENT ON COLUMN public.operation_failures.auto_retryable IS
   'Whether this operation type can be safely auto-retried (idempotent operations only)';
+COMMENT ON COLUMN public.operation_failures.claimed_at IS
+  'When this failure was last claimed by a worker. Used for lease-based recovery of abandoned claims.';
 COMMENT ON COLUMN public.operation_failures.status IS
-  'pending=awaiting retry, retrying=being retried, resolved=succeeded, '
-  'exhausted=max attempts reached, not_retryable=destructive op, manual intervention needed';
+  'pending=awaiting retry, retrying=claimed by worker (lease active), resolved=succeeded, '
+  'exhausted=all attempts used without resolution, not_retryable=destructive op';
 
 -- Indexes
-CREATE INDEX operation_failures_retryable_idx
+CREATE INDEX operation_failures_pending_idx
   ON public.operation_failures (status, next_retry_at)
-  WHERE status IN ('pending', 'retrying') AND auto_retryable = true;
+  WHERE status = 'pending' AND auto_retryable = true;
+
+CREATE INDEX operation_failures_retrying_lease_idx
+  ON public.operation_failures (claimed_at)
+  WHERE status = 'retrying';
 
 CREATE INDEX operation_failures_user_pending_idx
   ON public.operation_failures (user_id, status)
   WHERE status IN ('pending', 'retrying');
-
-CREATE INDEX operation_failures_not_retryable_idx
-  ON public.operation_failures (user_id)
-  WHERE status = 'not_retryable';
 
 -- RLS
 ALTER TABLE public.operation_failures ENABLE ROW LEVEL SECURITY;
@@ -130,7 +137,7 @@ BEGIN
     attempt_count, max_attempts, status, auto_retryable, next_retry_at
   ) VALUES (
     v_user_id, p_operation_type, COALESCE(p_payload, '{}'::jsonb),
-    p_error_message, 1, p_max_attempts, v_status,
+    p_error_message, 0, p_max_attempts, v_status,
     (v_status = 'pending'), now()
   ) RETURNING id INTO v_id;
 
@@ -139,8 +146,8 @@ END;
 $$;
 
 COMMENT ON FUNCTION public.record_operation_failure IS
-  'Records a failed operation for potential retry. Destructive operations '
-  '(complete_session, cancel_session, delete_account) are forced to not_retryable.';
+  'Records a failed operation for potential retry. attempt_count starts at 0 (never claimed). '
+  'Destructive operations are forced to not_retryable.';
 
 REVOKE ALL PRIVILEGES ON FUNCTION public.record_operation_failure(text, jsonb, text, boolean, integer)
   FROM PUBLIC, anon, authenticated;
@@ -148,7 +155,20 @@ GRANT EXECUTE ON FUNCTION public.record_operation_failure(text, jsonb, text, boo
   TO authenticated;
 
 -- ============================================================================
--- RETRY FAILED OPERATIONS (returns pending failures — does NOT execute them)
+-- RETRY FAILED OPERATIONS
+--
+-- Atomically claims pending failures using FOR UPDATE SKIP LOCKED.
+-- Returns ONLY the IDs claimed by THIS invocation — no cross-worker leakage.
+--
+-- EXHAUSTION LOGIC:
+--   1. Recover abandoned claims first (retrying + stale lease → pending)
+--   2. Mark as exhausted: retrying rows where attempt_count >= max_attempts
+--      (these were delivered previously but never resolved)
+--   3. Claim new pending rows where attempt_count < max_attempts
+--   4. Return only the newly claimed rows
+--
+-- This ensures every permitted attempt is delivered to a worker before
+-- exhaustion is checked on the subsequent call.
 -- ============================================================================
 
 CREATE OR REPLACE FUNCTION public.retry_failed_operations()
@@ -166,69 +186,88 @@ SECURITY DEFINER
 SET search_path = ''
 AS $$
 DECLARE
-  v_claimed_ids bigint[];
+  v_lease_timeout interval := interval '5 minutes';
 BEGIN
-  -- ATOMIC CLAIM: Lock due rows with SKIP LOCKED so concurrent workers
-  -- each get a distinct set of failures. No two workers can claim the same row.
-  -- The claimed rows are updated to 'retrying' in a single CTE.
-  WITH claimed AS (
-    SELECT id
-    FROM public.operation_failures
-    WHERE status = 'pending'
-      AND auto_retryable = true
-      AND next_retry_at <= now()
-      AND attempt_count < max_attempts
-    ORDER BY id
-    FOR UPDATE SKIP LOCKED
-  )
+  -- ========================================================================
+  -- STEP 1: Recover abandoned claims
+  -- Workers that crashed after claiming leave rows stuck in 'retrying'.
+  -- If claimed_at is older than the lease timeout, reset to 'pending'.
+  -- ========================================================================
   UPDATE public.operation_failures SET
-    status = 'retrying',
-    attempt_count = attempt_count + 1,
-    next_retry_at = now() + (
-      -- Exponential backoff: 2^attempt minutes (1m, 2m, 4m, 8m, 16m...)
-      (power(2, attempt_count)::integer || ' minutes')::interval
-    ),
+    status = 'pending',
+    claimed_at = NULL,
+    next_retry_at = now(),
     updated_at = now()
-  FROM claimed
-  WHERE public.operation_failures.id = claimed.id;
+  WHERE status = 'retrying'
+    AND claimed_at IS NOT NULL
+    AND claimed_at < now() - v_lease_timeout;
 
-  -- Mark exhausted operations (reached max attempts while in 'retrying')
+  -- ========================================================================
+  -- STEP 2: Exhaust failures that used all attempts without resolution
+  -- These are 'retrying' rows where attempt_count >= max_attempts.
+  -- They were delivered on a previous call but never resolved.
+  -- ========================================================================
   UPDATE public.operation_failures SET
     status = 'exhausted',
     updated_at = now()
   WHERE status = 'retrying'
     AND attempt_count >= max_attempts;
 
-  -- Return claimed operations that are still in 'retrying' state
-  -- (i.e., not exhausted). They remain 'retrying' until the caller
-  -- calls resolve_operation_failure() to mark them resolved.
-  -- This prevents double-processing: another worker cannot claim
-  -- a row that is already 'retrying'.
+  -- ========================================================================
+  -- STEP 3: Atomically claim pending failures and return ONLY claimed IDs
+  -- Uses UPDATE...RETURNING for atomic capture — no second SELECT needed.
+  -- FOR UPDATE SKIP LOCKED ensures concurrent workers get distinct rows.
+  -- ========================================================================
   RETURN QUERY
+  WITH claimed AS (
+    UPDATE public.operation_failures SET
+      status = 'retrying',
+      attempt_count = attempt_count + 1,
+      claimed_at = now(),
+      next_retry_at = now() + (
+        (power(2, attempt_count + 1)::integer || ' minutes')::interval
+      ),
+      updated_at = now()
+    WHERE id IN (
+      SELECT id FROM public.operation_failures
+      WHERE status = 'pending'
+        AND auto_retryable = true
+        AND next_retry_at <= now()
+        AND attempt_count < max_attempts
+      ORDER BY id
+      FOR UPDATE SKIP LOCKED
+    )
+    RETURNING
+      public.operation_failures.id,
+      public.operation_failures.user_id,
+      public.operation_failures.operation_type,
+      public.operation_failures.payload,
+      public.operation_failures.attempt_count,
+      public.operation_failures.max_attempts,
+      public.operation_failures.error_message
+  )
   SELECT
-    of2.id,
-    of2.user_id,
-    of2.operation_type,
-    of2.payload,
-    of2.attempt_count,
-    of2.max_attempts,
-    of2.error_message
-  FROM public.operation_failures of2
-  WHERE of2.status = 'retrying'
-    AND of2.attempt_count < of2.max_attempts
-  ORDER BY of2.id;
+    c.id,
+    c.user_id,
+    c.operation_type,
+    c.payload,
+    c.attempt_count,
+    c.max_attempts,
+    c.error_message
+  FROM claimed c
+  ORDER BY c.id;
 END;
 $$;
 
 COMMENT ON FUNCTION public.retry_failed_operations IS
   'Atomically claims pending retryable failures using FOR UPDATE SKIP LOCKED. '
-  'Concurrent workers each receive a distinct set. Claimed rows stay in '
-  '"retrying" state until resolved by resolve_operation_failure(). '
-  'Exhausted operations (max_attempts reached) are marked "exhausted". '
+  'Returns ONLY the IDs claimed by this invocation. '
+  'Recovers abandoned claims (lease > 5 min). '
+  'Marks exhausted failures (all attempts delivered, none resolved). '
   'Does NOT execute operations — the caller decides. SECURITY DEFINER.';
 
 REVOKE ALL PRIVILEGES ON FUNCTION public.retry_failed_operations() FROM PUBLIC, anon, authenticated;
--- Only service_role can call retry (SECURITY DEFINER bypasses RLS)
+GRANT EXECUTE ON FUNCTION public.retry_failed_operations() TO service_role;
 
 -- ============================================================================
 -- RESOLVE OPERATION FAILURE (mark as resolved after successful retry)
@@ -244,19 +283,22 @@ BEGIN
   UPDATE public.operation_failures SET
     status = 'resolved',
     resolved_at = now(),
+    claimed_at = NULL,
     updated_at = now()
   WHERE id = p_failure_id
-    AND status IN ('pending', 'retrying');
+    AND status = 'retrying';
 
   IF NOT FOUND THEN
-    RAISE EXCEPTION 'Operation failure % not found or already resolved/exhausted', p_failure_id;
+    RAISE EXCEPTION 'Operation failure % not found, not in retrying state, or already resolved/exhausted', p_failure_id;
   END IF;
 END;
 $$;
 
 COMMENT ON FUNCTION public.resolve_operation_failure IS
-  'Marks an operation failure as resolved after successful retry.';
+  'Marks a retrying operation failure as resolved after successful retry. '
+  'Only works on failures in "retrying" state (actively claimed).';
 
 REVOKE ALL PRIVILEGES ON FUNCTION public.resolve_operation_failure(bigint) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.resolve_operation_failure(bigint) TO service_role;
 
 COMMIT;
