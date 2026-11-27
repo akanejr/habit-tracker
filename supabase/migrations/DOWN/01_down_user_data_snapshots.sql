@@ -1,10 +1,10 @@
--- DOWN: User Data Snapshots
--- REVERSIBILITY: Fully reversible — drops all Phase 5 snapshot infrastructure.
--- DATA LOSS WARNING: All existing snapshots will be permanently deleted.
--- NEVER execute this automatically. Manual review required before running.
+-- DOWN: User Data Snapshots (corrected for current signatures)
+-- DATA LOSS: All snapshots permanently deleted.
+-- NEVER execute automatically.
 
 BEGIN;
 
+DROP FUNCTION IF EXISTS public.bloom_restore_user_data(bigint, uuid, boolean) CASCADE;
 DROP FUNCTION IF EXISTS public.bloom_restore_user_data(bigint, boolean) CASCADE;
 DROP FUNCTION IF EXISTS public.bloom_snapshot_user_data(text) CASCADE;
 

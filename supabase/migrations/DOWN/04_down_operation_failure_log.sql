@@ -1,12 +1,12 @@
--- DOWN: Operation Failure Log
--- REVERSIBILITY: Fully reversible — drops all Phase 5 failure tracking infrastructure.
--- DATA LOSS WARNING: All existing operation failure records will be permanently deleted.
---   If any failures were being tracked for retry, those retries will no longer occur.
--- NEVER execute this automatically. Manual review required before running.
+-- DOWN: Operation Failure Log (corrected for current signatures)
+-- DATA LOSS: All operation failure records permanently deleted.
+-- NEVER execute automatically.
 
 BEGIN;
 
+DROP FUNCTION IF EXISTS public.resolve_operation_failure(bigint, uuid) CASCADE;
 DROP FUNCTION IF EXISTS public.resolve_operation_failure(bigint) CASCADE;
+DROP FUNCTION IF EXISTS public.report_attempt_outcome(bigint, uuid, boolean, text) CASCADE;
 DROP FUNCTION IF EXISTS public.retry_failed_operations() CASCADE;
 DROP FUNCTION IF EXISTS public.record_operation_failure(text, jsonb, text, boolean, integer) CASCADE;
 

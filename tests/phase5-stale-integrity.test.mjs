@@ -430,6 +430,102 @@ const tests = [
     const noDuration = issues.filter(i => i.issue_type === 'completed_no_duration');
     assert(noDuration.length >= 1, 'Should detect completed session without duration');
   }),
+
+  test('MIXED SEGMENTS: Running session with completed + open segments detected', async () => {
+    await cleanup();
+    await setupHabit();
+
+    // Create a stale running session with 3 segments:
+    // 2 completed historical segments + 1 open (stale) segment
+    await setServiceRole();
+    const [session] = await sql`
+      INSERT INTO public.habit_sessions (
+        user_id, habit_id, source, status, recording_mode, started_at
+      ) VALUES (
+        ${TEST_USER_1}, ${TEST_HABIT_1}, 'timed', 'running', 'timer',
+        now() - 4 * interval '1 hour'
+      )
+      RETURNING id
+    `;
+    // Segment 1: completed long ago
+    await sql`
+      INSERT INTO public.habit_session_segments (session_id, user_id, started_at, ended_at)
+      VALUES (${session.id}, ${TEST_USER_1},
+        now() - 4 * interval '1 hour', now() - 3.5 * interval '1 hour')
+    `;
+    // Segment 2: completed
+    await sql`
+      INSERT INTO public.habit_session_segments (session_id, user_id, started_at, ended_at)
+      VALUES (${session.id}, ${TEST_USER_1},
+        now() - 3.5 * interval '1 hour', now() - 3 * interval '1 hour')
+    `;
+    // Segment 3: OPEN, started 3 hours ago (stale)
+    await sql`
+      INSERT INTO public.habit_session_segments (session_id, user_id, started_at, ended_at)
+      VALUES (${session.id}, ${TEST_USER_1},
+        now() - 3 * interval '1 hour', NULL)
+    `;
+    await resetRole();
+
+    await setAuth(sql, TEST_USER_1);
+    const [result] = await sql`SELECT public.bloom_cleanup_stale_sessions() AS count`;
+    assert(result.count === 1, `Should detect mixed-segment stale session, got ${result.count}`);
+
+    // Verify: all segments now closed, duration preserved
+    const openSegs = await sql`
+      SELECT COUNT(*)::int AS c FROM public.habit_session_segments
+      WHERE session_id = ${session.id} AND ended_at IS NULL
+    `;
+    assert(openSegs[0].c === 0, 'All segments closed');
+
+    const [s] = await sql`
+      SELECT status, estimated_ms FROM public.habit_sessions WHERE id = ${session.id}
+    `;
+    assert(s.status === 'cancelled', 'cancelled');
+    assert(s.estimated_ms > 0, `Duration preserved: ${s.estimated_ms}ms`);
+  }),
+
+  test('CONCURRENT CLEANUP: Two calls cannot double-cancel same session', async () => {
+    await cleanup();
+    await setupHabit();
+    const sessionId = await createStaleRunningSession();
+
+    // Open two separate connections
+    const w1 = postgres(DB_URL);
+    const w2 = postgres(DB_URL);
+    try {
+      await w1.unsafe(`SET request.jwt.claim.sub = '${TEST_USER_1}'`);
+      await w1.unsafe(`SET ROLE authenticated`);
+      await w2.unsafe(`SET request.jwt.claim.sub = '${TEST_USER_1}'`);
+      await w2.unsafe(`SET ROLE authenticated`);
+
+      // Both call cleanup simultaneously
+      const [r1, r2] = await Promise.all([
+        w1`SELECT public.bloom_cleanup_stale_sessions() AS count`,
+        w2`SELECT public.bloom_cleanup_stale_sessions() AS count`,
+      ]);
+
+      // Only one should have recovered the session (FOR UPDATE prevents double)
+      const total = r1[0].count + r2[0].count;
+      assert(total === 1, `Exactly 1 recovery total, got ${total} (W1=${r1[0].count}, W2=${r2[0].count})`);
+
+      // Verify session cancelled exactly once
+      const [s] = await w1`SELECT status, estimated_ms FROM public.habit_sessions WHERE id = ${sessionId}`;
+      assert(s.status === 'cancelled', 'cancelled');
+    } finally {
+      await w1.end();
+      await w2.end();
+    }
+  }),
+
+  test('Unauthenticated cleanup rejected', async () => {
+    await resetRole();
+    await sql.unsafe(`SET ROLE anon`);
+    let e = false;
+    try { await sql`SELECT public.bloom_cleanup_stale_sessions()`; } catch { e = true; }
+    assert(e, 'anon rejected');
+    await resetRole();
+  }),
 ];
 
 // ============================================================================

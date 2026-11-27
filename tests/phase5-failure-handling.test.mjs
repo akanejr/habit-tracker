@@ -1,22 +1,28 @@
 #!/usr/bin/env node
 /**
- * Phase 5: Failure Handling Tests
+ * Phase 5: Failure Handling, Concurrency & State Machine Tests
  *
- * Tests:
- *  1. Records failure with correct operation type and payload
- *  2. Destructive operations forced to not_retryable
- *  3. Idempotent operations can be marked retryable
- *  4. max_attempts bounded between 1 and 10
- *  5. retry_failed_operations returns only claimed IDs (worker isolation)
- *  6. Every permitted attempt is delivered before exhaustion
- *  7. Exhaustion only after final attempt was delivered and not resolved
- *  8. resolve_operation_failure marks as resolved
- *  9. resolve_operation_failure errors on non-retrying
- * 10. RLS: users can only see own failures
- * 11. Failure recording requires authentication
- * 12. CONCURRENCY: Two workers cannot claim the same failure (real overlap)
- * 13. CONCURRENCY: Claimed failures stay in retrying (not reset to pending)
- * 14. ABANDONED CLAIMS: Stale lease recovered after timeout
+ * Tests (20 total):
+ *  1. Records failure: attempt_count=0, correct fields
+ *  2. Destructive ops forced not_retryable
+ *  3. Idempotent ops can be retryable
+ *  4. max_attempts bounded 1-10
+ *  5. Claim returns token + lease
+ *  6. Every permitted attempt delivered before exhaustion
+ *  7. Final failed attempt → exhausted via report
+ *  8. Successful attempt → resolved via report
+ *  9. report with stale token rejected
+ * 10. report with expired lease rejected
+ * 11. resolve requires valid claim token
+ * 12. Expired lease recovered and re-delivered
+ * 13. Abandoned final attempt reaches exhausted (bounded)
+ * 14. RLS: users see only own failures
+ * 15. Anon cannot record
+ * 16. CONCURRENCY: Two workers, distinct claims (separate connections)
+ * 17. CONCURRENCY: Active lease cannot be reclaimed
+ * 18. CONCURRENCY: Old token cannot resolve reclaimed operation
+ * 19. CONCURRENCY: Active final attempt not prematurely exhausted
+ * 20. CONCURRENCY: No operation remains permanently stuck
  */
 
 import postgres from 'postgres';
@@ -74,422 +80,481 @@ function assert(condition, message) {
 // ============================================================================
 
 const tests = [
-  test('Records failure with correct operation type and payload', async () => {
+  test('Records failure: attempt_count=0, correct fields', async () => {
     await cleanup();
     await setAuth(TEST_USER_1);
 
-    const payload = { habit_id: 'test-habit-123', duration: 30000 };
     const [result] = await sql`
       SELECT public.record_operation_failure(
         'start_session',
-        ${sql.json(payload)},
+        ${sql.json({ habit_id: 'h1' })},
         'Connection timeout'
       ) AS id
     `;
-    assert(result.id > 0, 'Should return failure ID');
 
-    const [failure] = await sql`
-      SELECT * FROM public.operation_failures WHERE id = ${result.id}
-    `;
-    assert(failure.operation_type === 'start_session', 'Operation type should match');
-    assert(failure.error_message === 'Connection timeout', 'Error message should match');
-    assert(failure.payload.habit_id === 'test-habit-123', 'Payload should be preserved');
-    assert(failure.attempt_count === 0, 'Initial attempt_count should be 0 (never claimed)');
-    assert(failure.status === 'not_retryable', 'Default status should be not_retryable');
+    const [f] = await sql`SELECT * FROM public.operation_failures WHERE id = ${result.id}`;
+    assert(f.operation_type === 'start_session', 'type');
+    assert(f.error_message === 'Connection timeout', 'error');
+    assert(f.attempt_count === 0, `attempt_count should be 0, got ${f.attempt_count}`);
+    assert(f.status === 'not_retryable', 'default not_retryable');
+    assert(f.claim_token === null, 'no claim_token initially');
+    assert(f.lease_expires_at === null, 'no lease initially');
   }),
 
-  test('Destructive operations forced to not_retryable', async () => {
+  test('Destructive ops forced not_retryable', async () => {
     await cleanup();
     await setAuth(TEST_USER_1);
-
-    const destructiveOps = ['complete_session', 'cancel_session', 'delete_account'];
-    for (const op of destructiveOps) {
-      const [result] = await sql`
-        SELECT public.record_operation_failure(
-          ${op},
-          ${sql.json({})},
-          'test error',
-          true,
-          5
-        ) AS id
+    for (const op of ['complete_session', 'cancel_session', 'delete_account']) {
+      const [r] = await sql`
+        SELECT public.record_operation_failure(${op}, '{}'::jsonb, 'err', true, 5) AS id
       `;
-      const [failure] = await sql`
-        SELECT status, auto_retryable FROM public.operation_failures WHERE id = ${result.id}
-      `;
-      assert(failure.status === 'not_retryable',
-        `${op} should be not_retryable even when caller sets auto_retryable=true`);
-      assert(failure.auto_retryable === false,
-        `${op} should have auto_retryable=false`);
+      const [f] = await sql`SELECT status, auto_retryable FROM public.operation_failures WHERE id = ${r.id}`;
+      assert(f.status === 'not_retryable', `${op} not_retryable`);
+      assert(f.auto_retryable === false, `${op} auto_retryable=false`);
     }
   }),
 
-  test('Idempotent operations can be marked retryable', async () => {
+  test('Idempotent ops can be retryable', async () => {
     await cleanup();
     await setAuth(TEST_USER_1);
-
-    const [result] = await sql`
-      SELECT public.record_operation_failure(
-        'set_weekly_goal',
-        ${sql.json({ habit_id: 'h1', target: 3 })},
-        'Temporary failure',
-        true,
-        3
-      ) AS id
+    const [r] = await sql`
+      SELECT public.record_operation_failure('set_weekly_goal', '{}'::jsonb, 'err', true, 3) AS id
     `;
-
-    const [failure] = await sql`
-      SELECT status, auto_retryable, max_attempts FROM public.operation_failures
-      WHERE id = ${result.id}
-    `;
-    assert(failure.status === 'pending', 'Retryable op should be pending');
-    assert(failure.auto_retryable === true, 'auto_retryable should be true');
-    assert(failure.max_attempts === 3, 'max_attempts should match');
+    const [f] = await sql`SELECT status, auto_retryable, max_attempts FROM public.operation_failures WHERE id = ${r.id}`;
+    assert(f.status === 'pending', 'pending');
+    assert(f.auto_retryable === true, 'retryable');
+    assert(f.max_attempts === 3, 'max_attempts=3');
   }),
 
-  test('max_attempts bounded between 1 and 10', async () => {
+  test('max_attempts bounded 1-10', async () => {
     await cleanup();
     await setAuth(TEST_USER_1);
-
-    let errored = false;
-    try {
-      await sql`
-        SELECT public.record_operation_failure('test', ${sql.json({})}, 'err', true, 0)
-      `;
-    } catch (e) { errored = true; }
-    assert(errored, 'Should reject max_attempts < 1');
-
-    errored = false;
-    try {
-      await sql`
-        SELECT public.record_operation_failure('test', ${sql.json({})}, 'err', true, 11)
-      `;
-    } catch (e) { errored = true; }
-    assert(errored, 'Should reject max_attempts > 10');
+    let e = false;
+    try { await sql`SELECT public.record_operation_failure('x', '{}'::jsonb, 'e', true, 0)`; } catch { e = true; }
+    assert(e, 'reject 0');
+    e = false;
+    try { await sql`SELECT public.record_operation_failure('x', '{}'::jsonb, 'e', true, 11)`; } catch { e = true; }
+    assert(e, 'reject 11');
   }),
 
-  test('retry_failed_operations returns ONLY claimed IDs', async () => {
+  test('Claim returns token + lease', async () => {
     await cleanup();
     await setServiceRole();
-
-    // Create 2 due failures
-    for (let i = 0; i < 2; i++) {
-      await sql`
-        INSERT INTO public.operation_failures (
-          user_id, operation_type, payload, error_message,
-          status, auto_retryable, next_retry_at, attempt_count, max_attempts
-        ) VALUES (
-          ${TEST_USER_1}, 'start_session', ${sql.json({ index: i })},
-          'test ' || ${i}::text,
-          'pending', true, now() - interval '1 minute', 0, 5
-        )
-      `;
-    }
-
+    await sql`
+      INSERT INTO public.operation_failures (user_id, operation_type, payload, error_message,
+        status, auto_retryable, next_retry_at, attempt_count, max_attempts)
+      VALUES (${TEST_USER_1}, 'start_session', '{}'::jsonb, 'claim test',
+        'pending', true, now() - interval '1 minute', 0, 5)
+    `;
     const claimed = await sql`SELECT * FROM public.retry_failed_operations()`;
-    assert(claimed.length === 2, `Should claim exactly 2 failures, got ${claimed.length}`);
-    assert(claimed[0].attempt_count === 1, 'First attempt should be 1');
-    assert(claimed[1].attempt_count === 1, 'First attempt should be 1');
+    assert(claimed.length === 1, '1 claimed');
+    assert(claimed[0].claim_token !== null, 'has claim_token');
+    assert(claimed[0].lease_expires_at !== null, 'has lease_expires_at');
+    assert(claimed[0].attempt_count === 1, 'attempt 1');
+    assert(new Date(claimed[0].lease_expires_at) > new Date(), 'lease in future');
     await resetRole();
   }),
 
-  test('Every permitted attempt is delivered before exhaustion', async () => {
+  test('Every permitted attempt delivered before exhaustion', async () => {
     await cleanup();
     await setServiceRole();
-
-    // Create a failure with max_attempts = 3
     await sql`
-      INSERT INTO public.operation_failures (
-        user_id, operation_type, payload, error_message,
-        status, auto_retryable, next_retry_at, attempt_count, max_attempts
-      ) VALUES (
-        ${TEST_USER_1}, 'start_session', '{}'::jsonb, 'exhaustion test',
-        'pending', true, now() - interval '1 hour', 0, 3
-      )
+      INSERT INTO public.operation_failures (user_id, operation_type, payload, error_message,
+        status, auto_retryable, next_retry_at, attempt_count, max_attempts)
+      VALUES (${TEST_USER_1}, 'start_session', '{}'::jsonb, 'exhaust test',
+        'pending', true, now() - interval '1 hour', 0, 3)
     `;
 
-    // Attempt 1: should be delivered
+    // Attempt 1
     let claimed = await sql`SELECT * FROM public.retry_failed_operations()`;
-    assert(claimed.length === 1, 'Attempt 1: should deliver 1 failure');
-    assert(claimed[0].attempt_count === 1, 'Attempt 1: count should be 1');
+    assert(claimed.length === 1, 'attempt 1 delivered');
+    assert(claimed[0].attempt_count === 1, 'count=1');
+    const token1 = claimed[0].claim_token;
 
-    // Simulate: worker fails, resolve is NOT called (failure stays 'retrying')
-    // Manually set next_retry_at to past and status to pending to simulate
-    // the failure not being resolved
-    await sql`
-      UPDATE public.operation_failures SET
-        status = 'pending', next_retry_at = now() - interval '1 minute'
-      WHERE error_message = 'exhaustion test'
-    `;
+    // Report failure (attempt 1 failed, more remain)
+    let result = await sql`SELECT public.report_attempt_outcome(${claimed[0].failure_id}, ${token1}, false, 'fail1') AS status`;
+    assert(result[0].status === 'pending', `after fail: pending, got ${result[0].status}`);
 
-    // Attempt 2: should be delivered
+    // Attempt 2
     claimed = await sql`SELECT * FROM public.retry_failed_operations()`;
-    assert(claimed.length === 1, 'Attempt 2: should deliver 1 failure');
-    assert(claimed[0].attempt_count === 2, 'Attempt 2: count should be 2');
+    assert(claimed.length === 1, 'attempt 2 delivered');
+    assert(claimed[0].attempt_count === 2, 'count=2');
+    const token2 = claimed[0].claim_token;
 
-    await sql`
-      UPDATE public.operation_failures SET
-        status = 'pending', next_retry_at = now() - interval '1 minute'
-      WHERE error_message = 'exhaustion test'
-    `;
+    result = await sql`SELECT public.report_attempt_outcome(${claimed[0].failure_id}, ${token2}, false, 'fail2') AS status`;
+    assert(result[0].status === 'pending', 'after fail 2: pending');
 
-    // Attempt 3 (final): should be delivered
+    // Attempt 3 (final)
     claimed = await sql`SELECT * FROM public.retry_failed_operations()`;
-    assert(claimed.length === 1, 'Attempt 3 (final): should still deliver');
-    assert(claimed[0].attempt_count === 3, 'Attempt 3: count should be 3');
+    assert(claimed.length === 1, 'attempt 3 (final) delivered');
+    assert(claimed[0].attempt_count === 3, 'count=3');
+    const token3 = claimed[0].claim_token;
 
-    // Now mark it pending again — next call should EXHAUST it
-    await sql`
-      UPDATE public.operation_failures SET
-        status = 'pending', next_retry_at = now() - interval '1 minute'
-      WHERE error_message = 'exhaustion test'
-    `;
+    // Final attempt fails → exhausted
+    result = await sql`SELECT public.report_attempt_outcome(${claimed[0].failure_id}, ${token3}, false, 'fail3') AS status`;
+    assert(result[0].status === 'exhausted', `final fail: exhausted, got ${result[0].status}`);
 
-    // Attempt 4: should NOT be delivered (max reached)
+    // No more claims
     claimed = await sql`SELECT * FROM public.retry_failed_operations()`;
-    assert(claimed.length === 0, 'After max attempts: should deliver 0 failures');
-
-    // Verify exhaustion status
-    const [failure] = await sql`
-      SELECT status FROM public.operation_failures
-      WHERE error_message = 'exhaustion test'
-    `;
-    assert(failure.status === 'exhausted', 'Should be exhausted after all attempts used');
+    assert(claimed.length === 0, 'no more claims after exhaustion');
     await resetRole();
   }),
 
-  test('Exhaustion only after final attempt delivered and not resolved', async () => {
+  test('Final failed attempt → exhausted via report', async () => {
     await cleanup();
     await setServiceRole();
-
     await sql`
-      INSERT INTO public.operation_failures (
-        user_id, operation_type, payload, error_message,
-        status, auto_retryable, next_retry_at, attempt_count, max_attempts
-      ) VALUES (
-        ${TEST_USER_1}, 'start_session', '{}'::jsonb, 'resolve before exhaust',
-        'pending', true, now() - interval '1 hour', 0, 2
-      )
+      INSERT INTO public.operation_failures (user_id, operation_type, payload, error_message,
+        status, auto_retryable, next_retry_at, attempt_count, max_attempts)
+      VALUES (${TEST_USER_1}, 'start_session', '{}'::jsonb, 'final fail',
+        'pending', true, now() - interval '1 hour', 0, 1)
     `;
+    const claimed = await sql`SELECT * FROM public.retry_failed_operations()`;
+    assert(claimed.length === 1, 'delivered');
+    const result = await sql`SELECT public.report_attempt_outcome(${claimed[0].failure_id}, ${claimed[0].claim_token}, false, 'oops') AS status`;
+    assert(result[0].status === 'exhausted', 'exhausted after final fail');
 
-    // Attempt 1: deliver
-    let claimed = await sql`SELECT * FROM public.retry_failed_operations()`;
-    assert(claimed.length === 1, 'Should deliver attempt 1');
-    const failureId = claimed[0].failure_id;
-
-    // Worker resolves it successfully
-    await sql`SELECT public.resolve_operation_failure(${failureId})`;
-
-    const [resolved] = await sql`
-      SELECT status, resolved_at FROM public.operation_failures WHERE id = ${failureId}
-    `;
-    assert(resolved.status === 'resolved', 'Should be resolved');
-    assert(resolved.resolved_at !== null, 'Should have resolved_at');
-
-    // Next retry call should NOT touch the resolved failure
-    claimed = await sql`SELECT * FROM public.retry_failed_operations()`;
-    assert(claimed.length === 0, 'No failures to claim');
+    const [f] = await sql`SELECT status FROM public.operation_failures WHERE error_message = 'final fail'`;
+    assert(f.status === 'exhausted', 'persisted exhausted');
     await resetRole();
   }),
 
-  test('resolve_operation_failure marks as resolved', async () => {
+  test('Successful attempt → resolved via report', async () => {
     await cleanup();
     await setServiceRole();
-
     await sql`
-      INSERT INTO public.operation_failures (
-        user_id, operation_type, payload, error_message,
-        status, auto_retryable, next_retry_at, claimed_at
-      ) VALUES (
-        ${TEST_USER_1}, 'start_session', '{}'::jsonb, 'to resolve',
-        'retrying', true, now(), now()
-      )
+      INSERT INTO public.operation_failures (user_id, operation_type, payload, error_message,
+        status, auto_retryable, next_retry_at, attempt_count, max_attempts)
+      VALUES (${TEST_USER_1}, 'start_session', '{}'::jsonb, 'success test',
+        'pending', true, now() - interval '1 hour', 0, 3)
     `;
+    const claimed = await sql`SELECT * FROM public.retry_failed_operations()`;
+    const result = await sql`SELECT public.report_attempt_outcome(${claimed[0].failure_id}, ${claimed[0].claim_token}, true) AS status`;
+    assert(result[0].status === 'resolved', 'resolved');
 
-    const [failure] = await sql`
-      SELECT id FROM public.operation_failures
-      WHERE error_message = 'to resolve'
-    `;
-
-    await sql`SELECT public.resolve_operation_failure(${failure.id})`;
-
-    const [resolved] = await sql`
-      SELECT status, resolved_at FROM public.operation_failures WHERE id = ${failure.id}
-    `;
-    assert(resolved.status === 'resolved', 'Should be resolved');
-    assert(resolved.resolved_at !== null, 'Should have resolved_at timestamp');
+    const [f] = await sql`SELECT status, resolved_at FROM public.operation_failures WHERE error_message = 'success test'`;
+    assert(f.status === 'resolved', 'persisted resolved');
+    assert(f.resolved_at !== null, 'has resolved_at');
     await resetRole();
   }),
 
-  test('resolve_operation_failure errors on non-retrying', async () => {
+  test('report with stale token rejected', async () => {
+    await cleanup();
     await setServiceRole();
+    await sql`
+      INSERT INTO public.operation_failures (user_id, operation_type, payload, error_message,
+        status, auto_retryable, next_retry_at, attempt_count, max_attempts)
+      VALUES (${TEST_USER_1}, 'start_session', '{}'::jsonb, 'stale token',
+        'pending', true, now() - interval '1 hour', 0, 3)
+    `;
+    const claimed = await sql`SELECT * FROM public.retry_failed_operations()`;
+    const oldToken = claimed[0].claim_token;
 
-    // Try to resolve a non-existent ID
+    // Resolve it
+    await sql`SELECT public.report_attempt_outcome(${claimed[0].failure_id}, ${oldToken}, true)`;
+
+    // Try to report again with old token
     let errored = false;
     try {
-      await sql`SELECT public.resolve_operation_failure(999999)`;
+      await sql`SELECT public.report_attempt_outcome(${claimed[0].failure_id}, ${oldToken}, false, 'late')`;
     } catch (e) {
       errored = true;
-      assert(e.message.includes('not found') || e.message.includes('not in retrying'),
-        'Should mention not found or not retrying');
+      assert(e.message.includes('not in retrying') || e.message.includes('not found'),
+        `reject stale: ${e.message}`);
     }
-    assert(errored, 'Should error on non-existent/non-retrying failure');
+    assert(errored, 'stale token rejected');
     await resetRole();
   }),
 
-  test('RLS: users can only see own failures', async () => {
+  test('report with expired lease rejected', async () => {
     await cleanup();
-    await setAuth(TEST_USER_1);
-
+    await setServiceRole();
     await sql`
-      SELECT public.record_operation_failure(
-        'start_session', ${sql.json({ secret: 'user1-data' })}, 'user1 error'
-      )
+      INSERT INTO public.operation_failures (user_id, operation_type, payload, error_message,
+        status, auto_retryable, next_retry_at, attempt_count, max_attempts,
+        claim_token, lease_expires_at)
+      VALUES (${TEST_USER_1}, 'start_session', '{}'::jsonb, 'expired lease',
+        'retrying', true, now(), 1, 5,
+        gen_random_uuid(), now() - interval '1 minute')
     `;
-
-    await setAuth(TEST_USER_2);
-    const visible = await sql`
-      SELECT COUNT(*)::int AS count FROM public.operation_failures
-      WHERE user_id = ${TEST_USER_1}
-    `;
-    assert(visible[0].count === 0, 'User 2 should not see User 1 failures');
-  }),
-
-  test('Failure recording requires authentication', async () => {
-    await resetRole();
-    await sql.unsafe(`SET ROLE anon`);
+    const [f] = await sql`SELECT id, claim_token FROM public.operation_failures WHERE error_message = 'expired lease'`;
 
     let errored = false;
     try {
-      await sql`SELECT public.record_operation_failure('test', '{}'::jsonb, 'err')`;
-    } catch (e) { errored = true; }
-    assert(errored, 'Anon should not be able to record failures');
+      await sql`SELECT public.report_attempt_outcome(${f.id}, ${f.claim_token}, true)`;
+    } catch (e) {
+      errored = true;
+      assert(e.message.includes('expired') || e.message.includes('Lease'),
+        `lease expired error: ${e.message}`);
+    }
+    assert(errored, 'expired lease rejected');
+    await resetRole();
+  }),
+
+  test('resolve requires valid claim token', async () => {
+    await cleanup();
+    await setServiceRole();
+    await sql`
+      INSERT INTO public.operation_failures (user_id, operation_type, payload, error_message,
+        status, auto_retryable, next_retry_at, attempt_count, max_attempts)
+      VALUES (${TEST_USER_1}, 'start_session', '{}'::jsonb, 'resolve token',
+        'pending', true, now() - interval '1 hour', 0, 3)
+    `;
+    const claimed = await sql`SELECT * FROM public.retry_failed_operations()`;
+    const fakeToken = '00000000-0000-0000-0000-000000000099';
+
+    let errored = false;
+    try {
+      await sql`SELECT public.resolve_operation_failure(${claimed[0].failure_id}, ${fakeToken}::uuid)`;
+    } catch (e) {
+      errored = true;
+      assert(e.message.includes('Stale') || e.message.includes('reclaimed'),
+        `fake token: ${e.message}`);
+    }
+    assert(errored, 'fake token rejected');
+    await resetRole();
+  }),
+
+  test('Expired lease recovered and re-delivered', async () => {
+    await cleanup();
+    await setServiceRole();
+    await sql`
+      INSERT INTO public.operation_failures (user_id, operation_type, payload, error_message,
+        status, auto_retryable, next_retry_at, attempt_count, max_attempts,
+        claim_token, lease_expires_at)
+      VALUES (${TEST_USER_1}, 'start_session', '{}'::jsonb, 'abandoned',
+        'retrying', true, now(), 1, 5,
+        gen_random_uuid(), now() - interval '10 minutes')
+    `;
+    const claimed = await sql`SELECT * FROM public.retry_failed_operations()`;
+    assert(claimed.length === 1, 'recovered and re-delivered');
+    assert(claimed[0].attempt_count === 2, 'attempt incremented to 2');
+    assert(claimed[0].error_message === 'abandoned', 'same failure');
+    await resetRole();
+  }),
+
+  test('Abandoned final attempt reaches exhausted (bounded)', async () => {
+    await cleanup();
+    await setServiceRole();
+    // Final attempt (count = max) with expired lease
+    await sql`
+      INSERT INTO public.operation_failures (user_id, operation_type, payload, error_message,
+        status, auto_retryable, next_retry_at, attempt_count, max_attempts,
+        claim_token, lease_expires_at)
+      VALUES (${TEST_USER_1}, 'start_session', '{}'::jsonb, 'abandoned final',
+        'retrying', true, now(), 3, 3,
+        gen_random_uuid(), now() - interval '10 minutes')
+    `;
+    // Step 1 recovers expired lease → pending
+    // Step 2 exhausts (attempt_count >= max_attempts)
+    const claimed = await sql`SELECT * FROM public.retry_failed_operations()`;
+    assert(claimed.length === 0, 'no new claims (exhausted)');
+
+    const [f] = await sql`SELECT status FROM public.operation_failures WHERE error_message = 'abandoned final'`;
+    assert(f.status === 'exhausted', `abandoned final → exhausted, got ${f.status}`);
+    await resetRole();
+  }),
+
+  test('RLS: users see only own failures', async () => {
+    await cleanup();
+    await setAuth(TEST_USER_1);
+    await sql`SELECT public.record_operation_failure('start_session', '{}'::jsonb, 'u1')`;
+    await setAuth(TEST_USER_2);
+    const vis = await sql`SELECT COUNT(*)::int AS c FROM public.operation_failures WHERE user_id = ${TEST_USER_1}`;
+    assert(vis[0].c === 0, 'u2 cannot see u1');
+  }),
+
+  test('Anon cannot record', async () => {
+    await resetRole();
+    await sql.unsafe(`SET ROLE anon`);
+    let e = false;
+    try { await sql`SELECT public.record_operation_failure('x', '{}'::jsonb, 'e')`; } catch { e = true; }
+    assert(e, 'anon rejected');
     await resetRole();
   }),
 
   // ========================================================================
-  // CONCURRENCY TESTS
+  // GENUINE CONCURRENCY TESTS
   // ========================================================================
 
-  test('CONCURRENCY: Two workers cannot claim the same failure (real overlap)', async () => {
+  test('CONCURRENCY: Two workers, distinct claims (separate connections)', async () => {
     await cleanup();
-
-    // Create 5 retryable failures that are due for retry
     await setServiceRole();
     for (let i = 0; i < 5; i++) {
       await sql`
-        INSERT INTO public.operation_failures (
-          user_id, operation_type, payload, error_message,
-          status, auto_retryable, next_retry_at, attempt_count, max_attempts
-        ) VALUES (
-          ${TEST_USER_1}, 'start_session',
-          ${sql.json({ index: i })},
-          'concurrency test ' || ${i}::text,
-          'pending', true, now() - interval '1 minute', 0, 5
-        )
+        INSERT INTO public.operation_failures (user_id, operation_type, payload, error_message,
+          status, auto_retryable, next_retry_at, attempt_count, max_attempts)
+        VALUES (${TEST_USER_1}, 'start_session', ${sql.json({ i })}, 'conc ' || ${i}::text,
+          'pending', true, now() - interval '1 minute', 0, 5)
       `;
     }
 
-    // Open two SEPARATE database connections (genuine concurrent workers)
-    const worker1 = postgres(DB_URL);
-    const worker2 = postgres(DB_URL);
-
+    const w1 = postgres(DB_URL);
+    const w2 = postgres(DB_URL);
     try {
-      await worker1.unsafe(`SET ROLE service_role`);
-      await worker2.unsafe(`SET ROLE service_role`);
+      await w1.unsafe(`SET ROLE service_role`);
+      await w2.unsafe(`SET ROLE service_role`);
 
-      // Both workers call retry SIMULTANEOUSLY
-      const [claimed1, claimed2] = await Promise.all([
-        worker1`SELECT * FROM public.retry_failed_operations()`,
-        worker2`SELECT * FROM public.retry_failed_operations()`,
+      const [c1, c2] = await Promise.all([
+        w1`SELECT * FROM public.retry_failed_operations()`,
+        w2`SELECT * FROM public.retry_failed_operations()`,
       ]);
 
-      // Collect claimed failure IDs
-      const ids1 = new Set(claimed1.map(r => r.failure_id));
-      const ids2 = new Set(claimed2.map(r => r.failure_id));
+      const ids1 = new Set(c1.map(r => r.failure_id));
+      const ids2 = new Set(c2.map(r => r.failure_id));
+      const tokens1 = new Set(c1.map(r => r.claim_token));
+      const tokens2 = new Set(c2.map(r => r.claim_token));
 
-      // CRITICAL: No overlap — no failure_id appears in both workers
       for (const id of ids1) {
-        assert(!ids2.has(id),
-          `FAILURE: ID ${id} was claimed by BOTH workers — SKIP LOCKED broken`);
+        assert(!ids2.has(id), `ID ${id} claimed by both workers`);
       }
-
-      // Combined claims should not exceed 5 (total failures)
-      const totalClaimed = ids1.size + ids2.size;
-      assert(totalClaimed <= 5, `Total claimed should be <= 5, got ${totalClaimed}`);
-      assert(totalClaimed >= 1, 'At least one worker should have claimed something');
-
-      console.log(`     Worker 1 claimed: ${ids1.size}, Worker 2 claimed: ${ids2.size}, Total: ${totalClaimed}`);
+      for (const t of tokens1) {
+        assert(!tokens2.has(t), `Token ${t} given to both workers`);
+      }
+      assert(ids1.size + ids2.size <= 5, 'total ≤ 5');
+      assert(ids1.size + ids2.size >= 1, 'at least 1 claimed');
+      console.log(`     W1: ${ids1.size} claims, W2: ${ids2.size} claims, total: ${ids1.size + ids2.size}`);
     } finally {
-      await worker1.end();
-      await worker2.end();
+      await w1.end();
+      await w2.end();
     }
     await resetRole();
   }),
 
-  test('CONCURRENCY: Claimed failures stay in retrying (not reset to pending)', async () => {
+  test('CONCURRENCY: Active lease cannot be reclaimed', async () => {
     await cleanup();
     await setServiceRole();
-
     await sql`
-      INSERT INTO public.operation_failures (
-        user_id, operation_type, payload, error_message,
-        status, auto_retryable, next_retry_at, attempt_count, max_attempts
-      ) VALUES (
-        ${TEST_USER_1}, 'start_session', '{}'::jsonb, 'stays retrying',
-        'pending', true, now() - interval '1 minute', 0, 5
-      )
+      INSERT INTO public.operation_failures (user_id, operation_type, payload, error_message,
+        status, auto_retryable, next_retry_at, attempt_count, max_attempts)
+      VALUES (${TEST_USER_1}, 'start_session', '{}'::jsonb, 'active lease',
+        'pending', true, now() - interval '1 minute', 0, 5)
     `;
 
-    const claimed = await sql`SELECT * FROM public.retry_failed_operations()`;
-    assert(claimed.length === 1, 'Should claim 1 failure');
+    const w1 = postgres(DB_URL);
+    const w2 = postgres(DB_URL);
+    try {
+      await w1.unsafe(`SET ROLE service_role`);
+      await w2.unsafe(`SET ROLE service_role`);
 
-    const [failure] = await sql`
-      SELECT status, claimed_at FROM public.operation_failures
-      WHERE error_message = 'stays retrying'
-    `;
-    assert(failure.status === 'retrying',
-      `Claimed failure should stay 'retrying', got: ${failure.status}`);
-    assert(failure.claimed_at !== null, 'claimed_at should be set');
+      const c1 = await w1`SELECT * FROM public.retry_failed_operations()`;
+      assert(c1.length === 1, 'W1 claimed 1');
 
-    // Second retry call should NOT re-claim the same failure
-    const secondClaim = await sql`SELECT * FROM public.retry_failed_operations()`;
-    assert(secondClaim.length === 0,
-      'Second retry call should not re-claim already-retrying failures');
+      // W2 tries immediately — should get nothing (lease active)
+      const c2 = await w2`SELECT * FROM public.retry_failed_operations()`;
+      assert(c2.length === 0, `W2 should get 0, got ${c2.length}`);
+    } finally {
+      await w1.end();
+      await w2.end();
+    }
     await resetRole();
   }),
 
-  // ========================================================================
-  // ABANDONED CLAIM RECOVERY
-  // ========================================================================
-
-  test('ABANDONED CLAIMS: Stale lease recovered after timeout', async () => {
+  test('CONCURRENCY: Old token cannot resolve reclaimed operation', async () => {
     await cleanup();
     await setServiceRole();
 
-    // Simulate an abandoned claim: status='retrying', claimed_at > 5 minutes ago
+    // Create a failure, claim it with an expired lease
     await sql`
-      INSERT INTO public.operation_failures (
-        user_id, operation_type, payload, error_message,
-        status, auto_retryable, next_retry_at, attempt_count, max_attempts, claimed_at
-      ) VALUES (
-        ${TEST_USER_1}, 'start_session', '{}'::jsonb, 'abandoned claim',
-        'retrying', true, now() - interval '10 minutes', 1, 5,
-        now() - interval '10 minutes'
-      )
+      INSERT INTO public.operation_failures (user_id, operation_type, payload, error_message,
+        status, auto_retryable, next_retry_at, attempt_count, max_attempts,
+        claim_token, lease_expires_at)
+      VALUES (${TEST_USER_1}, 'start_session', '{}'::jsonb, 'reclaim test',
+        'retrying', true, now(), 1, 5,
+        'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'::uuid, now() - interval '10 minutes')
     `;
+    const oldToken = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
 
-    // Call retry — should recover the abandoned claim and re-deliver it
+    // Reclaim via retry (recovers expired lease)
     const claimed = await sql`SELECT * FROM public.retry_failed_operations()`;
-    assert(claimed.length === 1, `Should recover abandoned claim, got ${claimed.length}`);
-    assert(claimed[0].attempt_count === 2, 'Attempt count should increment to 2');
-    assert(claimed[0].error_message === 'abandoned claim', 'Should match the abandoned failure');
+    assert(claimed.length === 1, 'reclaimed');
+    const newToken = claimed[0].claim_token;
+    assert(newToken !== oldToken, 'new token differs from old');
 
-    // Verify the failure is now 'retrying' with a fresh claimed_at
-    const [failure] = await sql`
-      SELECT status, claimed_at FROM public.operation_failures
-      WHERE error_message = 'abandoned claim'
+    // Old token rejected
+    let errored = false;
+    try {
+      await sql`SELECT public.report_attempt_outcome(${claimed[0].failure_id}, ${oldToken}::uuid, true)`;
+    } catch (e) {
+      errored = true;
+      assert(e.message.includes('Stale') || e.message.includes('reclaimed'),
+        `old token: ${e.message}`);
+    }
+    assert(errored, 'old token rejected after reclaim');
+
+    // New token works
+    const result = await sql`SELECT public.report_attempt_outcome(${claimed[0].failure_id}, ${newToken}, true) AS status`;
+    assert(result[0].status === 'resolved', 'new token resolves');
+    await resetRole();
+  }),
+
+  test('CONCURRENCY: Active final attempt not prematurely exhausted', async () => {
+    await cleanup();
+    await setServiceRole();
+
+    // Create with attempt_count already at max-1, so next claim = final
+    await sql`
+      INSERT INTO public.operation_failures (user_id, operation_type, payload, error_message,
+        status, auto_retryable, next_retry_at, attempt_count, max_attempts)
+      VALUES (${TEST_USER_1}, 'start_session', '{}'::jsonb, 'final active',
+        'pending', true, now() - interval '1 hour', 2, 3)
     `;
-    assert(failure.status === 'retrying', 'Should be retrying after recovery');
+
+    // Claim (attempt 3 = final)
+    const claimed = await sql`SELECT * FROM public.retry_failed_operations()`;
+    assert(claimed.length === 1, 'final attempt delivered');
+    assert(claimed[0].attempt_count === 3, 'count=3');
+
+    // While lease is active, another retry call should NOT exhaust it
+    const secondCall = await sql`SELECT * FROM public.retry_failed_operations()`;
+    assert(secondCall.length === 0, 'no new claims (active lease)');
+
+    // Verify status is still retrying (not exhausted)
+    const [f] = await sql`SELECT status FROM public.operation_failures WHERE error_message = 'final active'`;
+    assert(f.status === 'retrying', `active final should be retrying, got ${f.status}`);
+    await resetRole();
+  }),
+
+  test('CONCURRENCY: No operation remains permanently stuck', async () => {
+    await cleanup();
+    await setServiceRole();
+
+    // Create a failure
+    await sql`
+      INSERT INTO public.operation_failures (user_id, operation_type, payload, error_message,
+        status, auto_retryable, next_retry_at, attempt_count, max_attempts)
+      VALUES (${TEST_USER_1}, 'start_session', '{}'::jsonb, 'stuck test',
+        'pending', true, now() - interval '1 hour', 0, 2)
+    `;
+
+    // Claim attempt 1
+    let claimed = await sql`SELECT * FROM public.retry_failed_operations()`;
+    assert(claimed.length === 1, 'attempt 1');
+
+    // Simulate: worker crashes (lease expires, not resolved)
+    // Manually expire the lease to simulate crash
+    await sql`
+      UPDATE public.operation_failures SET lease_expires_at = now() - interval '1 minute'
+      WHERE error_message = 'stuck test'
+    `;
+
+    // Next retry recovers and delivers attempt 2 (final)
+    claimed = await sql`SELECT * FROM public.retry_failed_operations()`;
+    assert(claimed.length === 1, 'attempt 2 (final) delivered');
+    assert(claimed[0].attempt_count === 2, 'count=2');
+
+    // Simulate: worker crashes again
+    await sql`
+      UPDATE public.operation_failures SET lease_expires_at = now() - interval '1 minute'
+      WHERE error_message = 'stuck test'
+    `;
+
+    // Next retry: lease recovered → pending → exhaustion check → exhausted
+    claimed = await sql`SELECT * FROM public.retry_failed_operations()`;
+    assert(claimed.length === 0, 'no more claims');
+
+    const [f] = await sql`SELECT status FROM public.operation_failures WHERE error_message = 'stuck test'`;
+    assert(f.status === 'exhausted', `not stuck: exhausted, got ${f.status}`);
     await resetRole();
   }),
 ];
@@ -499,24 +564,12 @@ const tests = [
 // ============================================================================
 
 async function run() {
-  console.log('\n📋 Phase 5: Failure Handling Tests\n');
-
-  for (const t of tests) {
-    await t();
-  }
-
-  console.log(`\n${'='.repeat(50)}`);
+  console.log('\n📋 Phase 5: Failure Handling, Concurrency & State Machine Tests\n');
+  for (const t of tests) { await t(); }
+  console.log(`\n${'='.repeat(60)}`);
   console.log(`Results: ${results.passed} passed, ${results.failed} failed, ${results.passed + results.failed} total`);
-
   await sql.end();
-
-  if (results.failed > 0) {
-    process.exit(1);
-  }
+  if (results.failed > 0) process.exit(1);
 }
 
-run().catch(err => {
-  console.error('Fatal error:', err);
-  sql.end();
-  process.exit(1);
-});
+run().catch(err => { console.error('Fatal:', err); sql.end(); process.exit(1); });
