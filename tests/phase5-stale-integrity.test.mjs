@@ -27,6 +27,7 @@ const STALE_HOURS = 3; // 3 hours ago (beyond 2-hour threshold)
 const FRESH_MINUTES = 30; // 30 minutes ago (under 2-hour threshold)
 
 let TEST_HABIT_1;
+let TEST_VERSION_ID;
 let results = { passed: 0, failed: 0, tests: [] };
 
 async function setAuth(conn, userId) {
@@ -68,6 +69,15 @@ async function setupHabit() {
     RETURNING id
   `;
   TEST_HABIT_1 = habit.id;
+  
+  // Create a habit version for timed sessions
+  const [version] = await sql`
+    INSERT INTO public.habit_versions (habit_id, user_id, name, frequency, target_per_week, is_active)
+    VALUES (${TEST_HABIT_1}, ${TEST_USER_1}, 'v1', 'daily', 3, true)
+    RETURNING id
+  `;
+  TEST_VERSION_ID = version.id;
+  
   await resetRole();
 }
 
@@ -75,10 +85,10 @@ async function createStaleRunningSession() {
   await setServiceRole();
   const [session] = await sql`
     INSERT INTO public.habit_sessions (
-      user_id, habit_id, source, status, recording_mode, started_at
+      user_id, habit_id, source, status, recording_mode, started_at, start_version_id
     ) VALUES (
       ${TEST_USER_1}, ${TEST_HABIT_1}, 'timed', 'running', 'timer',
-      now() - ${STALE_HOURS + '::integer'} * interval '1 hour'
+      now() - ${STALE_HOURS} * interval '1 hour', ${TEST_VERSION_ID}
     )
     RETURNING id
   `;
@@ -88,15 +98,15 @@ async function createStaleRunningSession() {
     INSERT INTO public.habit_session_segments (session_id, user_id, started_at, ended_at)
     VALUES (
       ${session.id}, ${TEST_USER_1},
-      now() - ${STALE_HOURS + '::integer'} * interval '1 hour',
-      now() - ${(STALE_HOURS - 1) + '::integer'} * interval '1 hour'
+      now() - ${STALE_HOURS} * interval '1 hour',
+      now() - ${STALE_HOURS - 1} * interval '1 hour'
     )
   `;
   await sql`
     INSERT INTO public.habit_session_segments (session_id, user_id, started_at, ended_at)
     VALUES (
       ${session.id}, ${TEST_USER_1},
-      now() - ${(STALE_HOURS - 1) + '::integer'} * interval '1 hour',
+      now() - ${STALE_HOURS - 1} * interval '1 hour',
       NULL
     )
   `;
@@ -108,10 +118,10 @@ async function createFreshRunningSession() {
   await setServiceRole();
   const [session] = await sql`
     INSERT INTO public.habit_sessions (
-      user_id, habit_id, source, status, recording_mode, started_at
+      user_id, habit_id, source, status, recording_mode, started_at, start_version_id
     ) VALUES (
       ${TEST_USER_1}, ${TEST_HABIT_1}, 'timed', 'running', 'timer',
-      now() - ${FRESH_MINUTES + '::integer'} * interval '1 minute'
+      now() - ${FRESH_MINUTES} * interval '1 minute', ${TEST_VERSION_ID}
     )
     RETURNING id
   `;
@@ -119,7 +129,7 @@ async function createFreshRunningSession() {
     INSERT INTO public.habit_session_segments (session_id, user_id, started_at, ended_at)
     VALUES (
       ${session.id}, ${TEST_USER_1},
-      now() - ${FRESH_MINUTES + '::integer'} * interval '1 minute',
+      now() - ${FRESH_MINUTES} * interval '1 minute',
       NULL
     )
   `;
@@ -176,10 +186,10 @@ const tests = [
     await setServiceRole();
     const [session] = await sql`
       INSERT INTO public.habit_sessions (
-        user_id, habit_id, source, status, recording_mode, started_at
+        user_id, habit_id, source, status, recording_mode, started_at, start_version_id
       ) VALUES (
         ${TEST_USER_1}, ${TEST_HABIT_1}, 'timed', 'paused', 'timer',
-        now() - 3 * interval '1 hour'
+        now() - 3 * interval '1 hour', ${TEST_VERSION_ID}
       )
       RETURNING id
     `;
@@ -189,7 +199,7 @@ const tests = [
       VALUES (
         ${session.id}, ${TEST_USER_1},
         now() - 3 * interval '1 hour',
-        now() - ${STALE_HOURS + '::integer'} * interval '1 hour'
+        now() - ${STALE_HOURS} * interval '1 hour'
       )
     `;
     await resetRole();
@@ -284,13 +294,12 @@ const tests = [
     await cleanup();
     await setupHabit();
 
-    // Create 2 stale sessions
-    await createStaleRunningSession();
+    // Create 1 stale session (unique constraint prevents multiple active sessions per user)
     await createStaleRunningSession();
 
     await setAuth(sql, TEST_USER_1);
     const [result] = await sql`SELECT public.bloom_cleanup_stale_sessions() AS count`;
-    assert(result.count === 2, `Should recover 2 sessions, got ${result.count}`);
+    assert(result.count === 1, `Should recover 1 session, got ${result.count}`);
   }),
 
   test('SECURITY: User A cannot trigger recovery of User B sessions', async () => {
@@ -298,6 +307,15 @@ const tests = [
     await setupHabit();
 
     const TEST_USER_2 = '00000000-0000-0000-0000-000000000002';
+
+    // Clean up any leftover User 2 data from previous runs
+    await setServiceRole();
+    await sql`DELETE FROM public.habit_session_segments WHERE user_id = ${TEST_USER_2}`;
+    await sql`DELETE FROM public.habit_sessions WHERE user_id = ${TEST_USER_2}`;
+    await sql`DELETE FROM public.habit_versions WHERE user_id = ${TEST_USER_2}`;
+    await sql`DELETE FROM public.habits WHERE user_id = ${TEST_USER_2}`;
+    await sql`DELETE FROM public.profiles WHERE id = ${TEST_USER_2}`;
+    await resetRole();
 
     // Create a stale session for User 2
     await setServiceRole();
@@ -311,12 +329,17 @@ const tests = [
       VALUES (${TEST_USER_2}, 'User B Habit', 'daily', 3, true)
       RETURNING id
     `;
+    const [version2] = await sql`
+      INSERT INTO public.habit_versions (habit_id, user_id, name, frequency, target_per_week, is_active)
+      VALUES (${habit2.id}, ${TEST_USER_2}, 'v1', 'daily', 3, true)
+      RETURNING id
+    `;
     const [session2] = await sql`
       INSERT INTO public.habit_sessions (
-        user_id, habit_id, source, status, recording_mode, started_at
+        user_id, habit_id, source, status, recording_mode, started_at, start_version_id
       ) VALUES (
         ${TEST_USER_2}, ${habit2.id}, 'timed', 'running', 'timer',
-        now() - 3 * interval '1 hour'
+        now() - 3 * interval '1 hour', ${version2.id}
       )
       RETURNING id
     `;
@@ -364,11 +387,11 @@ const tests = [
     const [session] = await sql`
       INSERT INTO public.habit_sessions (
         user_id, habit_id, source, status, recording_mode,
-        started_at, completed_at, completed_on, duration_ms
+        started_at, completed_at, completed_on, duration_ms, start_version_id
       ) VALUES (
         ${TEST_USER_1}, ${TEST_HABIT_1}, 'timed', 'completed', 'timer',
         now() - interval '1 hour', now() - interval '30 minutes',
-        (now() AT TIME ZONE 'Africa/Lagos')::date, 1800000
+        (now() AT TIME ZONE 'Africa/Lagos')::date, 1800000, ${TEST_VERSION_ID}
       )
       RETURNING id
     `;
@@ -415,11 +438,11 @@ const tests = [
     await sql`
       INSERT INTO public.habit_sessions (
         user_id, habit_id, source, status, recording_mode,
-        started_at, completed_at, completed_on
+        started_at, completed_at, completed_on, start_version_id
       ) VALUES (
         ${TEST_USER_1}, ${TEST_HABIT_1}, 'timed', 'completed', 'timer',
         now() - interval '1 hour', now() - interval '30 minutes',
-        (now() AT TIME ZONE 'Africa/Lagos')::date
+        (now() AT TIME ZONE 'Africa/Lagos')::date, ${TEST_VERSION_ID}
       )
     `;
     await resetRole();
@@ -440,10 +463,10 @@ const tests = [
     await setServiceRole();
     const [session] = await sql`
       INSERT INTO public.habit_sessions (
-        user_id, habit_id, source, status, recording_mode, started_at
+        user_id, habit_id, source, status, recording_mode, started_at, start_version_id
       ) VALUES (
         ${TEST_USER_1}, ${TEST_HABIT_1}, 'timed', 'running', 'timer',
-        now() - 4 * interval '1 hour'
+        now() - 4 * interval '1 hour', ${TEST_VERSION_ID}
       )
       RETURNING id
     `;

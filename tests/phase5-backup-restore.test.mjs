@@ -392,89 +392,131 @@ const tests = [
       'Should capture habit versions');
   }),
 
-  test('IDENTITY SEQUENCES: Normal insert succeeds after restore', async () => {
+  test('IDENTITY SEQUENCES: All 5 tables — normal insert after restore', async () => {
     await setupTestData();
-
-    // Create identity-backed records
     await setServiceRole();
-    const [seg] = await sql`
-      INSERT INTO public.habit_session_segments (session_id, user_id, started_at, ended_at)
-      SELECT hs.id, ${TEST_USER_1}, now() - interval '1 hour', now()
-      FROM public.habit_sessions hs WHERE hs.user_id = ${TEST_USER_1} LIMIT 1
-      RETURNING id
-    `;
 
-    // If no session exists, create one first
-    if (!seg) {
-      const [session] = await sql`
-        INSERT INTO public.habit_sessions (
-          user_id, habit_id, source, status, recording_mode,
-          started_at, completed_at, completed_on, duration_ms
-        ) VALUES (
-          ${TEST_USER_1}, ${TEST_HABIT_1}, 'timed', 'completed', 'timer',
-          now() - interval '1 hour', now(), (now() AT TIME ZONE 'Africa/Lagos')::date, 3600000
-        ) RETURNING id
-      `;
-      await sql`
-        INSERT INTO public.habit_session_segments (session_id, user_id, started_at, ended_at)
-        VALUES (${session.id}, ${TEST_USER_1}, now() - interval '1 hour', now())
-      `;
-    }
-
-    // Create goal version
-    await sql`
-      INSERT INTO public.habit_session_goal_versions (
-        habit_id, user_id, effective_week, weekly_session_target, goal_confirmed
-      ) VALUES (
-        ${TEST_HABIT_1}, ${TEST_USER_1},
-        public.lagos_week_start((now() AT TIME ZONE 'Africa/Lagos')::date),
-        3, true
-      )
-      ON CONFLICT (habit_id, effective_week) DO NOTHING
-    `;
-    await resetRole();
-
-    // Take snapshot
-    await setAuth(TEST_USER_1);
-    const [snapResult] = await sql`
-      SELECT public.bloom_snapshot_user_data('test: sequence sync') AS id
-    `;
-
-    // Restore via service_role (deletes and re-inserts with OVERRIDING SYSTEM VALUE)
-    await setServiceRole();
-    await sql`SELECT public.bloom_restore_user_data(${snapResult.id}, ${TEST_USER_1}, true)`;
-
-    // Now try normal inserts into each identity-backed table
-    // These should NOT fail with duplicate key errors
-    const [session2] = await sql`
+    // Create a completed quick session (needed for segments)
+    const [session] = await sql`
       INSERT INTO public.habit_sessions (
         user_id, habit_id, source, status, recording_mode,
         started_at, completed_at, completed_on, duration_ms
       ) VALUES (
         ${TEST_USER_1}, ${TEST_HABIT_1}, 'quick', 'completed', 'quick',
-        now(), now(), (now() AT TIME ZONE 'Africa/Lagos')::date, 1800000
+        now() - interval '2 hours', now() - interval '1 hour',
+        (now() AT TIME ZONE 'Africa/Lagos')::date, 3600000
       ) RETURNING id
     `;
-    assert(session2.id !== null, 'Normal insert into habit_sessions succeeded');
 
-    // Insert segment (identity column)
+    // 1. habit_session_segments (identity)
+    await sql`
+      INSERT INTO public.habit_session_segments (session_id, user_id, started_at, ended_at)
+      VALUES (${session.id}, ${TEST_USER_1}, now() - interval '2 hours', now() - interval '1 hour')
+    `;
+
+    // 2. habit_session_goal_versions (identity)
+    const [weekRow] = await sql`SELECT public.lagos_week_start((now() AT TIME ZONE 'Africa/Lagos')::date) AS d`;
+    await sql`
+      INSERT INTO public.habit_session_goal_versions (
+        habit_id, user_id, effective_week, weekly_session_target, goal_confirmed
+      ) VALUES (${TEST_HABIT_1}, ${TEST_USER_1}, ${weekRow.d}, 3, true)
+    `;
+
+    // 3. session_command_requests (identity)
+    await sql`
+      INSERT INTO public.session_command_requests (
+        request_id, user_id, operation_type, operation_payload
+      ) VALUES ('seq-test-req-1', ${TEST_USER_1}, 'start_session', '{"test": true}'::jsonb)
+    `;
+
+    // 4. incomplete_deletions (identity)
+    await sql`
+      INSERT INTO public.incomplete_deletions (
+        user_id, user_email, database_deleted_at, auth_deletion_attempts
+      ) VALUES (${TEST_USER_1}, 'user1@test.com', now(), 1)
+    `;
+
+    // 5. habit_versions (identity — already created by trigger, but add one explicitly)
+    await sql`
+      INSERT INTO public.habit_versions (
+        habit_id, user_id, is_baseline, name, frequency, target_per_week,
+        color, icon, is_active
+      ) VALUES (
+        ${TEST_HABIT_1}, ${TEST_USER_1}, false, 'Seq Test Version', 'daily', 5,
+        '#00ff00', 'check', true
+      )
+    `;
+
+    await resetRole();
+
+    // Take snapshot
+    await setAuth(TEST_USER_1);
+    const [snapResult] = await sql`
+      SELECT public.bloom_snapshot_user_data('test: all 5 sequences') AS id
+    `;
+
+    // Restore (deletes + re-inserts with OVERRIDING SYSTEM VALUE + sequence sync)
+    await setServiceRole();
+    await sql`SELECT public.bloom_restore_user_data(${snapResult.id}, ${TEST_USER_1}, true)`;
+
+    // Now perform normal inserts into ALL 5 identity-backed tables
+    // Each must succeed without duplicate key errors
+
+    // Get the restored session ID for segment insert
+    const [restoredSession] = await sql`
+      SELECT id FROM public.habit_sessions WHERE user_id = ${TEST_USER_1} LIMIT 1
+    `;
+
+    // 1. habit_session_segments
     const [newSeg] = await sql`
       INSERT INTO public.habit_session_segments (session_id, user_id, started_at, ended_at)
-      VALUES (${session2.id}, ${TEST_USER_1}, now(), now())
+      VALUES (${restoredSession.id}, ${TEST_USER_1}, now(), now())
       RETURNING id
     `;
-    assert(newSeg.id !== null, `Normal insert into segments succeeded (id=${newSeg.id})`);
+    assert(newSeg.id > 0, `1. segments: id=${newSeg.id} (valid)`);
 
-    // Insert goal version (identity column)
-    const nextWeek = await sql`SELECT public.lagos_week_start((now() AT TIME ZONE 'Africa/Lagos')::date + 7) AS d`;
+    // 2. habit_session_goal_versions
+    const [nextWeek] = await sql`SELECT public.lagos_week_start((now() AT TIME ZONE 'Africa/Lagos')::date + 7) AS d`;
     const [newGV] = await sql`
       INSERT INTO public.habit_session_goal_versions (
         habit_id, user_id, effective_week, weekly_session_target, goal_confirmed
-      ) VALUES (${TEST_HABIT_1}, ${TEST_USER_1}, ${nextWeek[0].d}, 5, true)
+      ) VALUES (${TEST_HABIT_1}, ${TEST_USER_1}, ${nextWeek.d}, 5, true)
       RETURNING id
     `;
-    assert(newGV.id !== null, `Normal insert into goal_versions succeeded (id=${newGV.id})`);
+    assert(newGV.id > 0, `2. goal_versions: id=${newGV.id} (valid)`);
 
+    // 3. session_command_requests
+    const [newSCR] = await sql`
+      INSERT INTO public.session_command_requests (
+        request_id, user_id, operation_type, operation_payload
+      ) VALUES ('seq-post-restore-1', ${TEST_USER_1}, 'quick_log', '{}'::jsonb)
+      RETURNING id
+    `;
+    assert(newSCR.id > 0, `3. command_requests: id=${newSCR.id} (valid)`);
+
+    // 4. incomplete_deletions
+    const [newIDel] = await sql`
+      INSERT INTO public.incomplete_deletions (
+        user_id, user_email, database_deleted_at, auth_deletion_attempts
+      ) VALUES (${TEST_USER_1}, 'post-restore@test.com', now(), 1)
+      RETURNING id
+    `;
+    assert(newIDel.id > 0, `4. incomplete_deletions: id=${newIDel.id} (valid)`);
+
+    // 5. habit_versions
+    const [newHV] = await sql`
+      INSERT INTO public.habit_versions (
+        habit_id, user_id, is_baseline, name, frequency, target_per_week,
+        color, icon, is_active
+      ) VALUES (
+        ${TEST_HABIT_1}, ${TEST_USER_1}, false, 'Post-Restore Version', 'daily', 7,
+        '#0000ff', 'star', true
+      )
+      RETURNING id
+    `;
+    assert(newHV.id > 0, `5. habit_versions: id=${newHV.id} (valid)`);
+
+    console.log(`     All 5 identity sequences: segments=${newSeg.id}, goals=${newGV.id}, cmds=${newSCR.id}, deletions=${newIDel.id}, versions=${newHV.id}`);
     await resetRole();
   }),
 ];

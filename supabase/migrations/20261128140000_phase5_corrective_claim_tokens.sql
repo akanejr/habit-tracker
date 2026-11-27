@@ -23,14 +23,6 @@
 --   retrying → exhausted     (report failure + no attempts remain)
 --   retrying → pending       (lease expired, recovered by next retry call)
 --   retrying → exhausted     (lease expired + attempt_count >= max, on next call)
---
--- ABANDONED FINAL ATTEMPTS:
---   When a final attempt (attempt_count = max_attempts) expires without being
---   resolved or reported as failed, the lease recovery step resets it to pending.
---   The exhaustion check (step 2) then marks it exhausted because
---   attempt_count >= max_attempts. This is bounded: the failure cannot
---   generate unlimited attempts. It reaches exhausted status after at most
---   max_attempts deliveries + 1 recovery cycle.
 
 BEGIN;
 
@@ -51,23 +43,18 @@ COMMENT ON COLUMN public.operation_failures.lease_expires_at IS
 
 -- Update index to include lease expiration for efficient recovery
 DROP INDEX IF EXISTS public.operation_failures_retrying_lease_idx;
-CREATE INDEX operation_failures_lease_idx
+CREATE INDEX IF NOT EXISTS operation_failures_lease_idx
   ON public.operation_failures (lease_expires_at)
   WHERE status = 'retrying' AND lease_expires_at IS NOT NULL;
 
+-- Drop old functions whose signatures/return types are changing
+DROP FUNCTION IF EXISTS public.retry_failed_operations() CASCADE;
+DROP FUNCTION IF EXISTS public.resolve_operation_failure(bigint) CASCADE;
+DROP FUNCTION IF EXISTS public.resolve_operation_failure(bigint, uuid) CASCADE;
+DROP FUNCTION IF EXISTS public.report_attempt_outcome(bigint, uuid, boolean, text) CASCADE;
+
 -- ============================================================================
 -- RETRY FAILED OPERATIONS (with claim tokens)
---
--- Returns: failure_id, claim_token, lease_expires_at, user_id, operation_type,
---          payload, attempt_count, max_attempts, error_message
---
--- Steps:
---   1. Recover expired leases (reset to pending)
---   2. Exhaust: retrying rows where attempt_count >= max_attempts
---      (these were delivered but never resolved/reported)
---   3. Claim pending rows with FOR UPDATE SKIP LOCKED
---      Assign unique claim_token and lease_expires_at
---      Return ONLY claimed rows
 -- ============================================================================
 
 CREATE OR REPLACE FUNCTION public.retry_failed_operations()
@@ -90,9 +77,7 @@ DECLARE
   v_lease_duration interval := interval '5 minutes';
 BEGIN
   -- ========================================================================
-  -- STEP 1: Recover expired leases
-  -- Rows in 'retrying' with lease_expires_at < now() are reset to 'pending'.
-  -- This allows them to be re-claimed or exhausted in steps 2-3.
+  -- STEP 1a: Recover expired NON-FINAL leases → pending (reclaimable)
   -- ========================================================================
   UPDATE public.operation_failures SET
     status = 'pending',
@@ -102,105 +87,83 @@ BEGIN
     updated_at = now()
   WHERE status = 'retrying'
     AND lease_expires_at IS NOT NULL
-    AND lease_expires_at < now();
+    AND lease_expires_at < now()
+    AND attempt_count < max_attempts;
 
   -- ========================================================================
-  -- STEP 2: Exhaust failures that used all attempts without resolution
-  -- These are 'retrying' rows where attempt_count >= max_attempts.
-  -- They were delivered on a previous call but the worker crashed or
-  -- never reported the outcome. The lease has expired (step 1 already
-  -- handled non-exhausted ones). Only rows that survived step 1
-  -- (i.e., lease still active or attempt_count >= max) reach here.
-  --
-  -- Active leases (not yet expired) are NOT exhausted — a worker may
-  -- still be processing them.
+  -- STEP 1b: Expired FINAL leases → exhausted (bounded)
   -- ========================================================================
   UPDATE public.operation_failures SET
     status = 'exhausted',
     claim_token = NULL,
     lease_expires_at = NULL,
+    resolved_at = now(),
+    updated_at = now()
+  WHERE status = 'retrying'
+    AND lease_expires_at IS NOT NULL
+    AND lease_expires_at < now()
+    AND attempt_count >= max_attempts;
+
+  -- ========================================================================
+  -- STEP 2: Defensive exhaustion — active retrying rows that exceeded max
+  -- ========================================================================
+  UPDATE public.operation_failures SET
+    status = 'exhausted',
+    claim_token = NULL,
+    lease_expires_at = NULL,
+    resolved_at = now(),
     updated_at = now()
   WHERE status = 'retrying'
     AND attempt_count >= max_attempts
     AND (lease_expires_at IS NULL OR lease_expires_at < now());
 
   -- ========================================================================
-  -- STEP 3: Atomically claim pending failures
-  -- Generate unique claim_token and lease_expires_at per row.
-  -- Return ONLY rows claimed by THIS invocation.
+  -- STEP 3: Claim pending rows with FOR UPDATE SKIP LOCKED
   -- ========================================================================
   RETURN QUERY
   WITH claimed AS (
-    UPDATE public.operation_failures SET
-      status = 'retrying',
-      attempt_count = attempt_count + 1,
-      claim_token = gen_random_uuid(),
-      lease_expires_at = now() + v_lease_duration,
-      next_retry_at = now() + (
-        (power(2, attempt_count + 1)::integer || ' minutes')::interval
-      ),
-      updated_at = now()
-    WHERE id IN (
-      SELECT id FROM public.operation_failures
-      WHERE status = 'pending'
-        AND auto_retryable = true
-        AND next_retry_at <= now()
-        AND attempt_count < max_attempts
-      ORDER BY id
-      FOR UPDATE SKIP LOCKED
-    )
-    RETURNING
-      public.operation_failures.id,
-      public.operation_failures.claim_token,
-      public.operation_failures.lease_expires_at,
-      public.operation_failures.user_id,
-      public.operation_failures.operation_type,
-      public.operation_failures.payload,
-      public.operation_failures.attempt_count,
-      public.operation_failures.max_attempts,
-      public.operation_failures.error_message
+    SELECT f2.id FROM public.operation_failures f2
+    WHERE f2.status = 'pending'
+      AND f2.next_retry_at <= now()
+      AND f2.auto_retryable = true
+      AND f2.attempt_count < f2.max_attempts
+    ORDER BY f2.next_retry_at ASC
+    FOR UPDATE SKIP LOCKED
   )
-  SELECT
-    c.id,
-    c.claim_token,
-    c.lease_expires_at,
-    c.user_id,
-    c.operation_type,
-    c.payload,
-    c.attempt_count,
-    c.max_attempts,
-    c.error_message
+  UPDATE public.operation_failures AS f SET
+    status = 'retrying',
+    attempt_count = f.attempt_count + 1,
+    claim_token = gen_random_uuid(),
+    lease_expires_at = now() + v_lease_duration,
+    next_retry_at = now() + v_lease_duration,
+    updated_at = now()
   FROM claimed c
-  ORDER BY c.id;
+  WHERE f.id = c.id
+  RETURNING
+    f.id,
+    f.claim_token,
+    f.lease_expires_at,
+    f.user_id,
+    f.operation_type,
+    f.payload,
+    f.attempt_count,
+    f.max_attempts,
+    f.error_message;
 END;
 $$;
 
 COMMENT ON FUNCTION public.retry_failed_operations IS
-  'Atomically claims pending failures with unique claim tokens and lease expiration. '
-  'Returns ONLY IDs claimed by this invocation. '
-  'Recovers expired leases. Exhausts unresolvable failures. '
-  'Workers must use claim_token when calling report_attempt_outcome().';
+  'Claims pending failures and delivers them to workers with claim tokens. '
+  'Recovers expired non-final leases (→ pending), exhausts expired final leases (→ exhausted), '
+  'and claims pending rows with FOR UPDATE SKIP LOCKED for safe concurrency. '
+  'Returns: failure_id, claim_token, lease_expires_at, user_id, operation_type, '
+  'payload, attempt_count, max_attempts, error_message';
 
 REVOKE ALL PRIVILEGES ON FUNCTION public.retry_failed_operations() FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.retry_failed_operations() TO service_role;
 
 -- ============================================================================
--- REPORT ATTEMPT OUTCOME (new function)
---
--- Worker reports whether an attempt succeeded or failed.
--- Requires valid claim_token to prevent stale workers from interfering.
---
--- On success:
---   → resolved
---
--- On failure with remaining attempts:
---   → pending (with backoff, cleared claim)
---
--- On failure with no remaining attempts:
---   → exhausted (final attempt failed, bounded)
---
--- Stale token rejection:
---   If claim_token doesn't match, or lease expired, the call is rejected.
+-- REPORT ATTEMPT OUTCOME (atomic state transition)
 -- ============================================================================
 
 CREATE OR REPLACE FUNCTION public.report_attempt_outcome(
@@ -215,70 +178,82 @@ SECURITY DEFINER
 SET search_path = ''
 AS $$
 DECLARE
-  v_current record;
-  v_new_status text;
+  v_result text;
+  v_row_count integer;
 BEGIN
   IF p_claim_token IS NULL THEN
     RAISE EXCEPTION 'claim_token is required';
   END IF;
 
-  -- Fetch current state
-  SELECT id, status, claim_token, lease_expires_at, attempt_count, max_attempts
-  INTO v_current
-  FROM public.operation_failures
-  WHERE id = p_failure_id;
-
-  IF NOT FOUND THEN
-    RAISE EXCEPTION 'Failure % not found', p_failure_id;
-  END IF;
-
-  -- Must be in retrying state
-  IF v_current.status != 'retrying' THEN
-    RAISE EXCEPTION 'Failure % is not in retrying state (current: %)', p_failure_id, v_current.status;
-  END IF;
-
-  -- Validate claim token (prevents stale workers)
-  IF v_current.claim_token IS DISTINCT FROM p_claim_token THEN
-    RAISE EXCEPTION 'Stale claim token: failure % has been reclaimed by another worker', p_failure_id;
-  END IF;
-
-  -- Check lease expiration
-  IF v_current.lease_expires_at IS NOT NULL AND v_current.lease_expires_at < now() THEN
-    RAISE EXCEPTION 'Lease expired for failure % (expired at %). Claim may have been recovered.',
-      p_failure_id, v_current.lease_expires_at;
-  END IF;
-
-  -- Determine new status
-  IF p_success THEN
-    v_new_status := 'resolved';
-  ELSIF v_current.attempt_count < v_current.max_attempts THEN
-    v_new_status := 'pending';  -- more attempts available
-  ELSE
-    v_new_status := 'exhausted';  -- final attempt failed
-  END IF;
-
-  -- Apply state transition atomically
-  -- The claim_token check in WHERE ensures no stale update
+  -- ====================================================================
+  -- ATOMIC STATE TRANSITION
+  -- Single UPDATE validates ALL conditions in the WHERE clause:
+  --   1. Correct failure ID
+  --   2. Status is 'retrying'
+  --   3. Claim token matches (prevents stale worker)
+  --   4. Lease has not expired (prevents post-expiry reporting)
+  -- ====================================================================
   UPDATE public.operation_failures SET
-    status = v_new_status,
-    resolved_at = CASE WHEN v_new_status = 'resolved' THEN now() ELSE NULL END,
+    status = CASE
+      WHEN p_success THEN 'resolved'
+      WHEN attempt_count < max_attempts THEN 'pending'
+      ELSE 'exhausted'
+    END,
+    resolved_at = CASE WHEN p_success THEN now() ELSE NULL END,
     claim_token = NULL,
     lease_expires_at = NULL,
     error_message = COALESCE(p_error_message, public.operation_failures.error_message),
     next_retry_at = CASE
-      WHEN v_new_status = 'pending' THEN
-        now() + ((power(2, v_current.attempt_count)::integer || ' minutes')::interval)
+      WHEN NOT p_success AND attempt_count < max_attempts THEN
+        now() + ((power(2, attempt_count)::integer || ' minutes')::interval)
       ELSE public.operation_failures.next_retry_at
     END,
     updated_at = now()
   WHERE id = p_failure_id
-    AND claim_token = p_claim_token;
+    AND status = 'retrying'
+    AND claim_token = p_claim_token
+    AND (lease_expires_at IS NULL OR lease_expires_at >= now());
 
-  IF NOT FOUND THEN
-    RAISE EXCEPTION 'Failed to update failure % — claim token may have changed', p_failure_id;
+  GET DIAGNOSTICS v_row_count = ROW_COUNT;
+
+  IF v_row_count = 0 THEN
+    -- Determine specific rejection reason
+    SELECT
+      CASE
+        WHEN f.id IS NULL THEN 'not_found'
+        WHEN f.status != 'retrying' THEN 'not_retrying:' || f.status
+        WHEN f.claim_token IS DISTINCT FROM p_claim_token THEN 'stale_token'
+        WHEN f.lease_expires_at IS NOT NULL AND f.lease_expires_at < now() THEN 'lease_expired'
+        ELSE 'unknown'
+      END
+    INTO v_result
+    FROM public.operation_failures f
+    WHERE f.id = p_failure_id;
+
+    IF v_result IS NULL THEN
+      RAISE EXCEPTION 'Failure % not found', p_failure_id;
+    ELSIF v_result = 'not_retrying:resolved' THEN
+      RAISE EXCEPTION 'Failure % already resolved', p_failure_id;
+    ELSIF v_result = 'not_retrying:exhausted' THEN
+      RAISE EXCEPTION 'Failure % already exhausted', p_failure_id;
+    ELSIF v_result LIKE 'not_retrying:%' THEN
+      RAISE EXCEPTION 'Failure % is not in retrying state (current: %)',
+        p_failure_id, split_part(v_result, ':', 2);
+    ELSIF v_result = 'stale_token' THEN
+      RAISE EXCEPTION 'Stale claim token for failure % — reclaimed by another worker', p_failure_id;
+    ELSIF v_result = 'lease_expired' THEN
+      RAISE EXCEPTION 'Lease expired for failure % — claim may have been recovered', p_failure_id;
+    ELSE
+      RAISE EXCEPTION 'Cannot report outcome for failure % (%)', p_failure_id, v_result;
+    END IF;
   END IF;
 
-  RETURN v_new_status;
+  -- Read back the new status
+  SELECT status INTO v_result
+  FROM public.operation_failures
+  WHERE id = p_failure_id;
+
+  RETURN v_result;
 END;
 $$;
 
@@ -294,7 +269,6 @@ GRANT EXECUTE ON FUNCTION public.report_attempt_outcome(bigint, uuid, boolean, t
 
 -- ============================================================================
 -- RESOLVE OPERATION FAILURE (updated: requires claim_token)
--- Backward-compatible wrapper that calls report_attempt_outcome(success=true)
 -- ============================================================================
 
 CREATE OR REPLACE FUNCTION public.resolve_operation_failure(
@@ -310,7 +284,6 @@ DECLARE
   v_result text;
 BEGIN
   v_result := public.report_attempt_outcome(p_failure_id, p_claim_token, true, NULL);
-  -- report_attempt_outcome handles all validation and state transitions
 END;
 $$;
 
