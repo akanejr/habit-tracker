@@ -165,8 +165,22 @@ LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = ''
 AS $$
+DECLARE
+  v_claimed_ids bigint[];
 BEGIN
-  -- Increment attempt count and apply exponential backoff for all due retries
+  -- ATOMIC CLAIM: Lock due rows with SKIP LOCKED so concurrent workers
+  -- each get a distinct set of failures. No two workers can claim the same row.
+  -- The claimed rows are updated to 'retrying' in a single CTE.
+  WITH claimed AS (
+    SELECT id
+    FROM public.operation_failures
+    WHERE status = 'pending'
+      AND auto_retryable = true
+      AND next_retry_at <= now()
+      AND attempt_count < max_attempts
+    ORDER BY id
+    FOR UPDATE SKIP LOCKED
+  )
   UPDATE public.operation_failures SET
     status = 'retrying',
     attempt_count = attempt_count + 1,
@@ -175,19 +189,21 @@ BEGIN
       (power(2, attempt_count)::integer || ' minutes')::interval
     ),
     updated_at = now()
-  WHERE status = 'pending'
-    AND auto_retryable = true
-    AND next_retry_at <= now()
-    AND attempt_count < max_attempts;
+  FROM claimed
+  WHERE public.operation_failures.id = claimed.id;
 
-  -- Mark exhausted operations (reached max attempts)
+  -- Mark exhausted operations (reached max attempts while in 'retrying')
   UPDATE public.operation_failures SET
     status = 'exhausted',
     updated_at = now()
   WHERE status = 'retrying'
     AND attempt_count >= max_attempts;
 
-  -- Return all currently retrying operations (caller decides what to do)
+  -- Return claimed operations that are still in 'retrying' state
+  -- (i.e., not exhausted). They remain 'retrying' until the caller
+  -- calls resolve_operation_failure() to mark them resolved.
+  -- This prevents double-processing: another worker cannot claim
+  -- a row that is already 'retrying'.
   RETURN QUERY
   SELECT
     of2.id,
@@ -198,19 +214,17 @@ BEGIN
     of2.max_attempts,
     of2.error_message
   FROM public.operation_failures of2
-  WHERE of2.status = 'retrying';
-
-  -- Mark returned operations back to pending for next retry cycle
-  UPDATE public.operation_failures SET
-    status = 'pending',
-    updated_at = now()
-  WHERE status = 'retrying';
+  WHERE of2.status = 'retrying'
+    AND of2.attempt_count < of2.max_attempts
+  ORDER BY of2.id;
 END;
 $$;
 
 COMMENT ON FUNCTION public.retry_failed_operations IS
-  'Finds pending retryable failures due for retry, applies exponential backoff, '
-  'marks exhausted operations, and returns retrying failures for the caller to process. '
+  'Atomically claims pending retryable failures using FOR UPDATE SKIP LOCKED. '
+  'Concurrent workers each receive a distinct set. Claimed rows stay in '
+  '"retrying" state until resolved by resolve_operation_failure(). '
+  'Exhausted operations (max_attempts reached) are marked "exhausted". '
   'Does NOT execute operations — the caller decides. SECURITY DEFINER.';
 
 REVOKE ALL PRIVILEGES ON FUNCTION public.retry_failed_operations() FROM PUBLIC, anon, authenticated;

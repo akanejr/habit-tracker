@@ -293,6 +293,64 @@ const tests = [
     assert(result.count === 2, `Should recover 2 sessions, got ${result.count}`);
   }),
 
+  test('SECURITY: User A cannot trigger recovery of User B sessions', async () => {
+    await cleanup();
+    await setupHabit();
+
+    const TEST_USER_2 = '00000000-0000-0000-0000-000000000002';
+
+    // Create a stale session for User 2
+    await setServiceRole();
+    await sql`
+      INSERT INTO public.profiles (id, display_name)
+      VALUES (${TEST_USER_2}, 'User B')
+      ON CONFLICT (id) DO NOTHING
+    `;
+    const [habit2] = await sql`
+      INSERT INTO public.habits (user_id, name, frequency, target_per_week, is_active)
+      VALUES (${TEST_USER_2}, 'User B Habit', 'daily', 3, true)
+      RETURNING id
+    `;
+    const [session2] = await sql`
+      INSERT INTO public.habit_sessions (
+        user_id, habit_id, source, status, recording_mode, started_at
+      ) VALUES (
+        ${TEST_USER_2}, ${habit2.id}, 'timed', 'running', 'timer',
+        now() - 3 * interval '1 hour'
+      )
+      RETURNING id
+    `;
+    await sql`
+      INSERT INTO public.habit_session_segments (session_id, user_id, started_at, ended_at)
+      VALUES (${session2.id}, ${TEST_USER_2}, now() - 3 * interval '1 hour', NULL)
+    `;
+    await resetRole();
+
+    // Also create a stale session for User 1
+    const session1 = await createStaleRunningSession();
+
+    // User 1 calls cleanup — should ONLY affect User 1's session
+    await setAuth(sql, TEST_USER_1);
+    const [result] = await sql`SELECT public.bloom_cleanup_stale_sessions() AS count`;
+
+    // User 1's session should be cancelled
+    const [s1] = await sql`SELECT status FROM public.habit_sessions WHERE id = ${session1}`;
+    assert(s1.status === 'cancelled', 'User 1 stale session should be cancelled');
+
+    // User 2's session should STILL be running (not touched by User 1)
+    await setServiceRole();
+    const [s2] = await sql`SELECT status FROM public.habit_sessions WHERE id = ${session2.id}`;
+    assert(s2.status === 'running',
+      `User 2 session must remain running, but got: ${s2.status}`);
+
+    // Cleanup user 2 data
+    await sql`DELETE FROM public.habit_session_segments WHERE user_id = ${TEST_USER_2}`;
+    await sql`DELETE FROM public.habit_sessions WHERE user_id = ${TEST_USER_2}`;
+    await sql`DELETE FROM public.habits WHERE user_id = ${TEST_USER_2}`;
+    await sql`DELETE FROM public.profiles WHERE id = ${TEST_USER_2}`;
+    await resetRole();
+  }),
+
   // ========================================================================
   // INTEGRITY CHECK TESTS
   // ========================================================================

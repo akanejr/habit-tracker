@@ -173,10 +173,18 @@ DECLARE
   v_current_count integer;
   v_item jsonb;
 BEGIN
-  -- Auth check (service_role bypasses RLS via SECURITY DEFINER)
+  -- Auth check: verify caller is authenticated
   v_caller_id := (SELECT auth.uid());
   IF v_caller_id IS NULL THEN
-    RAISE EXCEPTION 'Not authenticated — restore requires service_role or authenticated caller';
+    RAISE EXCEPTION 'Not authenticated — restore requires authentication';
+  END IF;
+
+  -- Role check: p_force requires service_role
+  IF p_force THEN
+    IF current_setting('role', true) IS DISTINCT FROM 'service_role' THEN
+      RAISE EXCEPTION 'p_force = true requires service_role. '
+        'Authenticated users cannot force-restore over existing data.';
+    END IF;
   END IF;
 
   -- Fetch snapshot and validate ownership
@@ -408,8 +416,10 @@ COMMENT ON FUNCTION public.bloom_restore_user_data IS
   'Restores user data from a snapshot. Validates ownership, respects FK ordering, '
   'errors if newer data exists unless p_force = true. SECURITY DEFINER — restricted to service_role.';
 
--- Restore is privileged: revoke from regular users, grant only to service_role
-REVOKE ALL PRIVILEGES ON FUNCTION public.bloom_restore_user_data(bigint, boolean) FROM PUBLIC, anon, authenticated;
--- service_role has access by default via SECURITY DEFINER
+-- Restore is privileged: revoke from regular users, grant explicitly to service_role
+REVOKE ALL PRIVILEGES ON FUNCTION public.bloom_restore_user_data(bigint, boolean)
+  FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.bloom_restore_user_data(bigint, boolean)
+  TO service_role;
 
 COMMIT;

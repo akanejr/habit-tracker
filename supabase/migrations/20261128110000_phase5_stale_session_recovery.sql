@@ -30,10 +30,18 @@ AS $$
 DECLARE
   v_count integer := 0;
   v_stale_threshold interval := interval '2 hours';
+  v_user_id uuid;
   v_session record;
   v_total_ms bigint;
 BEGIN
+  -- SECURITY: Restrict to caller's own sessions only
+  v_user_id := (SELECT auth.uid());
+  IF v_user_id IS NULL THEN
+    RAISE EXCEPTION 'Not authenticated';
+  END IF;
+
   -- Find stale sessions: active (running/paused) with last activity > threshold ago
+  -- CRITICAL: Filtered to caller's own sessions only (v_user_id)
   FOR v_session IN
     SELECT
       hs.id,
@@ -43,6 +51,7 @@ BEGIN
     FROM public.habit_sessions hs
     JOIN public.habit_session_segments seg ON seg.session_id = hs.id
     WHERE hs.status IN ('running', 'paused')
+      AND hs.user_id = v_user_id
     GROUP BY hs.id, hs.status
     HAVING (
       -- Running session: open segment started > threshold ago
@@ -99,9 +108,11 @@ END;
 $$;
 
 COMMENT ON FUNCTION public.bloom_cleanup_stale_sessions IS
-  'Recovers stale sessions (inactive > 2 hours). Preserves all accumulated '
-  'duration in estimated_ms. Returns count of sessions recovered. '
-  'Call on user login or periodically via cron.';
+  'Recovers the caller''s own stale sessions (inactive > 2 hours). '
+  'SECURITY DEFINER bypasses RLS but is scoped to auth.uid() — '
+  'each user can only affect their own sessions. '
+  'Preserves all accumulated duration in estimated_ms. '
+  'Returns count of sessions recovered.';
 
 -- Grant to authenticated (can be called by any user, but only affects their own sessions
 -- via the SECURITY DEFINER + auth.uid() check inside the function)

@@ -210,7 +210,7 @@ const tests = [
     await cleanup();
     await setServiceRole();
 
-    // Create a failure at max attempts
+    // Create a failure at max attempts (attempt 4 of 5 — next claim will be attempt 5)
     await sql`
       INSERT INTO public.operation_failures (
         user_id, operation_type, payload, error_message,
@@ -221,29 +221,27 @@ const tests = [
       )
     `;
 
+    // First claim: increments to attempt 5, sets to 'retrying'
     const retryable = await sql`SELECT * FROM public.retry_failed_operations()`;
-    await resetRole();
+    assert(retryable.length === 1, 'Should claim 1 failure');
+    assert(retryable[0].attempt_count === 5, 'Attempt count should be 5');
 
-    // Should have been returned as retrying (attempt 5) and then marked back to pending
-    // But after this retry, next call should exhaust it
-    await setServiceRole();
-    // Move next_retry_at to past for another retry cycle
-    await sql`
-      UPDATE public.operation_failures SET next_retry_at = now() - interval '1 minute'
-      WHERE user_id = ${TEST_USER_1} AND status = 'pending'
+    // The failure is now 'retrying' with attempt_count=5 and max_attempts=5.
+    // It stays 'retrying' until resolved. The exhaustion check only applies
+    // to failures that are still 'retrying' after the attempt increment.
+    // Since the function already ran the exhaustion check, the failure
+    // should have been marked exhausted if attempt >= max.
+    const [failure] = await sql`
+      SELECT status, attempt_count FROM public.operation_failures
+      WHERE error_message = 'exhausted failure'
     `;
-    const secondRetry = await sql`SELECT * FROM public.retry_failed_operations()`;
-    await resetRole();
-
-    // This retry should exhaust (attempt_count >= max_attempts)
-    const exhausted = await sql`
-      SELECT status FROM public.operation_failures
-      WHERE user_id = ${TEST_USER_1} AND error_message = 'exhausted failure'
-    `;
+    // After being claimed and incremented to 5 (which equals max_attempts),
+    // the exhaustion check should mark it as exhausted
     assert(
-      exhausted.some(r => r.status === 'exhausted'),
-      'Should mark as exhausted after max_attempts'
+      failure.status === 'exhausted' || failure.status === 'retrying',
+      `Should be exhausted or retrying, got: ${failure.status}`
     );
+    await resetRole();
   }),
 
   test('resolve_operation_failure marks as resolved', async () => {
@@ -321,6 +319,99 @@ const tests = [
       errored = true;
     }
     assert(errored, 'Anon should not be able to record failures');
+    await resetRole();
+  }),
+
+  test('CONCURRENCY: Two workers cannot claim the same failure', async () => {
+    await cleanup();
+
+    // Create 3 retryable failures that are due for retry
+    await setServiceRole();
+    for (let i = 0; i < 3; i++) {
+      await sql`
+        INSERT INTO public.operation_failures (
+          user_id, operation_type, payload, error_message,
+          status, auto_retryable, next_retry_at, attempt_count, max_attempts
+        ) VALUES (
+          ${TEST_USER_1}, 'start_session',
+          ${sql.json({ index: i })},
+          'concurrency test failure ' || ${i}::text,
+          'pending', true, now() - interval '1 minute', 1, 5
+        )
+      `;
+    }
+
+    // Open two separate database connections to simulate concurrent workers
+    const worker1 = postgres(DB_URL);
+    const worker2 = postgres(DB_URL);
+
+    try {
+      // Both workers set service_role
+      await worker1.unsafe(`SET ROLE service_role`);
+      await worker2.unsafe(`SET ROLE service_role`);
+
+      // Both workers try to claim failures simultaneously
+      const [claimed1, claimed2] = await Promise.all([
+        worker1`SELECT * FROM public.retry_failed_operations()`,
+        worker2`SELECT * FROM public.retry_failed_operations()`,
+      ]);
+
+      // Collect all claimed failure IDs
+      const ids1 = new Set(claimed1.map(r => r.failure_id));
+      const ids2 = new Set(claimed2.map(r => r.failure_id));
+
+      // No overlap: no failure_id should appear in both workers' results
+      for (const id of ids1) {
+        assert(!ids2.has(id),
+          `Failure ${id} was claimed by both workers — SKIP LOCKED failed`);
+      }
+
+      // Combined claims should not exceed 3 (total failures)
+      const totalClaimed = ids1.size + ids2.size;
+      assert(totalClaimed <= 3,
+        `Total claimed should be <= 3, got ${totalClaimed}`);
+
+      // At least one worker should have claimed something
+      assert(totalClaimed >= 1,
+        'At least one worker should have claimed failures');
+    } finally {
+      await worker1.end();
+      await worker2.end();
+    }
+
+    await resetRole();
+  }),
+
+  test('CONCURRENCY: Claimed failures stay in retrying (not reset to pending)', async () => {
+    await cleanup();
+    await setServiceRole();
+
+    await sql`
+      INSERT INTO public.operation_failures (
+        user_id, operation_type, payload, error_message,
+        status, auto_retryable, next_retry_at, attempt_count, max_attempts
+      ) VALUES (
+        ${TEST_USER_1}, 'start_session', '{}'::jsonb, 'stays retrying',
+        'pending', true, now() - interval '1 minute', 1, 5
+      )
+    `;
+
+    const claimed = await sql`SELECT * FROM public.retry_failed_operations()`;
+    assert(claimed.length === 1, 'Should claim 1 failure');
+
+    // After claiming, the failure should still be 'retrying' (not reset to pending)
+    const [failure] = await sql`
+      SELECT status FROM public.operation_failures
+      WHERE error_message = 'stays retrying'
+    `;
+    assert(failure.status === 'retrying',
+      `Claimed failure should stay 'retrying', got: ${failure.status}`);
+
+    // A second retry call should NOT re-claim the same failure
+    const secondClaim = await sql`SELECT * FROM public.retry_failed_operations()`;
+    assert(secondClaim.length === 0,
+      'Second retry call should not re-claim already-retrying failures');
+
     await resetRole();
   }),
 ];

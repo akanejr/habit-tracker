@@ -179,39 +179,100 @@ const tests = [
     assert(visible[0].count === 0, 'User 2 should not see User 1 snapshot');
   }),
 
-  test('Restore validates ownership', async () => {
+  test('Authenticated user cannot call restore (revoked)', async () => {
     await setupTestData();
     await setAuth(sql, TEST_USER_1);
 
     const [result] = await sql`
-      SELECT public.bloom_snapshot_user_data('test: ownership check') AS id
+      SELECT public.bloom_snapshot_user_data('test: auth check') AS id
     `;
 
-    // User 2 should not be able to restore user 1's snapshot
-    await setAuth(sql, TEST_USER_2);
+    // Authenticated user should get permission error (EXECUTE revoked from authenticated)
     let errored = false;
     try {
-      await setServiceRole();
-      // Even service_role should check that the caller matches the snapshot owner
-      await sql`SELECT public.bloom_restore_user_data(${result.id}, true)`;
+      await sql`SELECT public.bloom_restore_user_data(${result.id}, false)`;
     } catch (e) {
       errored = true;
+      assert(
+        e.message.includes('permission denied') || e.message.includes('not permitted')
+        || e.message.includes('EXECUTE'),
+        `Should be permission error, got: ${e.message}`
+      );
     }
-    // Note: SECURITY DEFINER bypasses caller auth; the function itself checks ownership
-    // So this test verifies the function's internal ownership check
-    await sql`RESET ROLE`;
-    // The restore function checks v_snapshot.user_id != v_caller_id
-    // When called as user 2 via SECURITY DEFINER, auth.uid() returns user 2
-    await setAuth(sql, TEST_USER_2);
-    errored = false;
+    assert(errored, 'Authenticated user should not call restore');
+  }),
+
+  test('Service-role can restore own data', async () => {
+    await setupTestData();
+    await setAuth(sql, TEST_USER_1);
+
+    const [result] = await sql`
+      SELECT public.bloom_snapshot_user_data('test: service-role restore') AS id
+    `;
+
+    // Delete user data via service_role
+    await setServiceRole();
+    await sql`DELETE FROM public.habit_logs WHERE user_id = ${TEST_USER_1}`;
+    await sql`DELETE FROM public.habits WHERE user_id = ${TEST_USER_1}`;
+
+    // Restore via service_role (authenticated as the user, but using service_role)
+    await sql`
+      SET request.jwt.claim.sub = '${TEST_USER_1}';
+      SET ROLE service_role
+    `;
+    await sql`SELECT public.bloom_restore_user_data(${result.id}, false)`;
+
+    // Verify data is restored
+    const habits = await sql`
+      SELECT COUNT(*)::int AS count FROM public.habits WHERE user_id = ${TEST_USER_1}
+    `;
+    assert(habits[0].count >= 1, 'Habits should be restored by service_role');
+    await resetRole();
+  }),
+
+  test('Cross-user snapshot restore blocked even with service_role', async () => {
+    await setupTestData();
+    await setAuth(sql, TEST_USER_1);
+
+    const [result] = await sql`
+      SELECT public.bloom_snapshot_user_data('test: cross-user') AS id
+    `;
+
+    // Service-role as User 2 tries to restore User 1's snapshot
+    await sql`
+      SET request.jwt.claim.sub = '${TEST_USER_2}';
+      SET ROLE service_role
+    `;
+    let errored = false;
     try {
       await sql`SELECT public.bloom_restore_user_data(${result.id}, true)`;
     } catch (e) {
       errored = true;
-      assert(e.message.includes('different user') || e.message.includes('Access denied'),
-        'Error should mention ownership');
+      assert(
+        e.message.includes('different user') || e.message.includes('Access denied'),
+        `Error should mention ownership, got: ${e.message}`
+      );
     }
-    assert(errored, 'User 2 should not restore User 1 snapshot');
+    assert(errored, 'User 2 (even as service_role) should not restore User 1 snapshot');
+    await resetRole();
+  }),
+
+  test('p_force requires service_role (authenticated rejected)', async () => {
+    await setupTestData();
+    await setAuth(sql, TEST_USER_1);
+
+    const [result] = await sql`
+      SELECT public.bloom_snapshot_user_data('test: force check') AS id
+    `;
+
+    // Authenticated user should not even be able to call restore at all
+    let errored = false;
+    try {
+      await sql`SELECT public.bloom_restore_user_data(${result.id}, true)`;
+    } catch (e) {
+      errored = true;
+    }
+    assert(errored, 'Authenticated user should not call restore with p_force');
   }),
 
   test('Restore errors when newer data exists without p_force', async () => {
@@ -222,7 +283,11 @@ const tests = [
       SELECT public.bloom_snapshot_user_data('test: force check') AS id
     `;
 
-    // User has habits, restore without force should error
+    // Service-role as user 1: restore without force should error when data exists
+    await sql`
+      SET request.jwt.claim.sub = '${TEST_USER_1}';
+      SET ROLE service_role
+    `;
     let errored = false;
     try {
       await sql`SELECT public.bloom_restore_user_data(${result.id}, false)`;
@@ -232,9 +297,10 @@ const tests = [
         'Error should mention existing data');
     }
     assert(errored, 'Should error without p_force when data exists');
+    await resetRole();
   }),
 
-  test('Restore with p_force overwrites existing data', async () => {
+  test('Restore with p_force overwrites existing data (service_role)', async () => {
     await setupTestData();
     await setAuth(sql, TEST_USER_1);
 
@@ -249,10 +315,9 @@ const tests = [
       INSERT INTO public.habits (user_id, name, is_active)
       VALUES (${TEST_USER_1}, 'Post-snapshot habit', true)
     `;
-    await sql`RESET ROLE`;
 
-    // Force restore should succeed
-    await setAuth(sql, TEST_USER_1);
+    // Force restore via service_role should succeed
+    await sql`SET request.jwt.claim.sub = '${TEST_USER_1}'`;
     await sql`SELECT public.bloom_restore_user_data(${result.id}, true)`;
 
     // Verify: post-snapshot habit should be gone
@@ -262,6 +327,7 @@ const tests = [
     const names = habits.map(h => h.name);
     assert(names.includes('Backup Test Habit'), 'Original habit should be restored');
     assert(!names.includes('Post-snapshot habit'), 'Post-snapshot habit should be removed');
+    await resetRole();
   }),
 
   test('Restore is idempotent (double restore = same result)', async () => {
@@ -272,7 +338,11 @@ const tests = [
       SELECT public.bloom_snapshot_user_data('test: idempotent') AS id
     `;
 
-    // First restore
+    // First restore via service_role
+    await sql`
+      SET request.jwt.claim.sub = '${TEST_USER_1}';
+      SET ROLE service_role
+    `;
     await sql`SELECT public.bloom_restore_user_data(${result.id}, true)`;
 
     const afterFirst = await sql`
@@ -292,6 +362,7 @@ const tests = [
 
     assert(afterFirst[0].habits === afterSecond[0].habits, 'Same habit count after double restore');
     assert(afterFirst[0].logs === afterSecond[0].logs, 'Same log count after double restore');
+    await resetRole();
   }),
 
   test('Snapshot preserves habit-log foreign key relationships', async () => {
