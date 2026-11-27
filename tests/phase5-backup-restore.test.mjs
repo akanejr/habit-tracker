@@ -459,8 +459,17 @@ const tests = [
     await setServiceRole();
     await sql`SELECT public.bloom_restore_user_data(${snapResult.id}, ${TEST_USER_1}, true)`;
 
+    // Capture max restored IDs for all 5 tables
+    const [maxSeg] = await sql`SELECT COALESCE(MAX(id), 0)::int AS max_id FROM public.habit_session_segments WHERE user_id = ${TEST_USER_1}`;
+    const [maxGV] = await sql`SELECT COALESCE(MAX(id), 0)::int AS max_id FROM public.habit_session_goal_versions WHERE user_id = ${TEST_USER_1}`;
+    const [maxSCR] = await sql`SELECT COALESCE(MAX(id), 0)::int AS max_id FROM public.session_command_requests WHERE user_id = ${TEST_USER_1}`;
+    const [maxIDel] = await sql`SELECT COALESCE(MAX(id), 0)::int AS max_id FROM public.incomplete_deletions WHERE user_id = ${TEST_USER_1}`;
+    const [maxHV] = await sql`SELECT COALESCE(MAX(id), 0)::int AS max_id FROM public.habit_versions WHERE user_id = ${TEST_USER_1}`;
+
+    console.log(`     Max restored IDs: segments=${maxSeg.max_id}, goals=${maxGV.max_id}, cmds=${maxSCR.max_id}, deletions=${maxIDel.max_id}, versions=${maxHV.max_id}`);
+
     // Now perform normal inserts into ALL 5 identity-backed tables
-    // Each must succeed without duplicate key errors
+    // Each new ID must be strictly greater than the max restored ID
 
     // Get the restored session ID for segment insert
     const [restoredSession] = await sql`
@@ -473,7 +482,9 @@ const tests = [
       VALUES (${restoredSession.id}, ${TEST_USER_1}, now(), now())
       RETURNING id
     `;
-    assert(newSeg.id > 0, `1. segments: id=${newSeg.id} (valid)`);
+    assert(newSeg.id > maxSeg.max_id, `1. segments: new id=${newSeg.id} must be > max restored=${maxSeg.max_id}`);
+    const [verifySeg] = await sql`SELECT id FROM public.habit_session_segments WHERE id = ${newSeg.id}`;
+    assert(verifySeg.id === newSeg.id, '1. segments: record exists');
 
     // 2. habit_session_goal_versions
     const [nextWeek] = await sql`SELECT public.lagos_week_start((now() AT TIME ZONE 'Africa/Lagos')::date + 7) AS d`;
@@ -483,7 +494,9 @@ const tests = [
       ) VALUES (${TEST_HABIT_1}, ${TEST_USER_1}, ${nextWeek.d}, 5, true)
       RETURNING id
     `;
-    assert(newGV.id > 0, `2. goal_versions: id=${newGV.id} (valid)`);
+    assert(newGV.id > maxGV.max_id, `2. goal_versions: new id=${newGV.id} must be > max restored=${maxGV.max_id}`);
+    const [verifyGV] = await sql`SELECT id FROM public.habit_session_goal_versions WHERE id = ${newGV.id}`;
+    assert(verifyGV.id === newGV.id, '2. goal_versions: record exists');
 
     // 3. session_command_requests
     const [newSCR] = await sql`
@@ -492,7 +505,9 @@ const tests = [
       ) VALUES ('seq-post-restore-1', ${TEST_USER_1}, 'quick_log', '{}'::jsonb)
       RETURNING id
     `;
-    assert(newSCR.id > 0, `3. command_requests: id=${newSCR.id} (valid)`);
+    assert(newSCR.id > maxSCR.max_id, `3. command_requests: new id=${newSCR.id} must be > max restored=${maxSCR.max_id}`);
+    const [verifySCR] = await sql`SELECT id FROM public.session_command_requests WHERE id = ${newSCR.id}`;
+    assert(verifySCR.id === newSCR.id, '3. command_requests: record exists');
 
     // 4. incomplete_deletions
     const [newIDel] = await sql`
@@ -501,7 +516,9 @@ const tests = [
       ) VALUES (${TEST_USER_1}, 'post-restore@test.com', now(), 1)
       RETURNING id
     `;
-    assert(newIDel.id > 0, `4. incomplete_deletions: id=${newIDel.id} (valid)`);
+    assert(newIDel.id > maxIDel.max_id, `4. incomplete_deletions: new id=${newIDel.id} must be > max restored=${maxIDel.max_id}`);
+    const [verifyIDel] = await sql`SELECT id FROM public.incomplete_deletions WHERE id = ${newIDel.id}`;
+    assert(verifyIDel.id === newIDel.id, '4. incomplete_deletions: record exists');
 
     // 5. habit_versions
     const [newHV] = await sql`
@@ -514,9 +531,12 @@ const tests = [
       )
       RETURNING id
     `;
-    assert(newHV.id > 0, `5. habit_versions: id=${newHV.id} (valid)`);
+    assert(newHV.id > maxHV.max_id, `5. habit_versions: new id=${newHV.id} must be > max restored=${maxHV.max_id}`);
+    const [verifyHV] = await sql`SELECT id FROM public.habit_versions WHERE id = ${newHV.id}`;
+    assert(verifyHV.id === newHV.id, '5. habit_versions: record exists');
 
-    console.log(`     All 5 identity sequences: segments=${newSeg.id}, goals=${newGV.id}, cmds=${newSCR.id}, deletions=${newIDel.id}, versions=${newHV.id}`);
+    console.log(`     Post-restore IDs: segments=${newSeg.id}, goals=${newGV.id}, cmds=${newSCR.id}, deletions=${newIDel.id}, versions=${newHV.id}`);
+    console.log(`     All 5 sequences verified: new IDs strictly greater than max restored IDs`);
     await resetRole();
   }),
 ];

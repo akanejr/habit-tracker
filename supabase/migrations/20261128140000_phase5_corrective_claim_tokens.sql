@@ -79,43 +79,43 @@ BEGIN
   -- ========================================================================
   -- STEP 1a: Recover expired NON-FINAL leases → pending (reclaimable)
   -- ========================================================================
-  UPDATE public.operation_failures SET
+  UPDATE public.operation_failures AS f SET
     status = 'pending',
     claim_token = NULL,
     lease_expires_at = NULL,
     next_retry_at = now(),
     updated_at = now()
-  WHERE status = 'retrying'
-    AND lease_expires_at IS NOT NULL
-    AND lease_expires_at < now()
-    AND attempt_count < max_attempts;
+  WHERE f.status = 'retrying'
+    AND f.lease_expires_at IS NOT NULL
+    AND f.lease_expires_at < now()
+    AND f.attempt_count < f.max_attempts;
 
   -- ========================================================================
   -- STEP 1b: Expired FINAL leases → exhausted (bounded)
   -- ========================================================================
-  UPDATE public.operation_failures SET
+  UPDATE public.operation_failures AS f SET
     status = 'exhausted',
     claim_token = NULL,
     lease_expires_at = NULL,
     resolved_at = now(),
     updated_at = now()
-  WHERE status = 'retrying'
-    AND lease_expires_at IS NOT NULL
-    AND lease_expires_at < now()
-    AND attempt_count >= max_attempts;
+  WHERE f.status = 'retrying'
+    AND f.lease_expires_at IS NOT NULL
+    AND f.lease_expires_at < now()
+    AND f.attempt_count >= f.max_attempts;
 
   -- ========================================================================
   -- STEP 2: Defensive exhaustion — active retrying rows that exceeded max
   -- ========================================================================
-  UPDATE public.operation_failures SET
+  UPDATE public.operation_failures AS f SET
     status = 'exhausted',
     claim_token = NULL,
     lease_expires_at = NULL,
     resolved_at = now(),
     updated_at = now()
-  WHERE status = 'retrying'
-    AND attempt_count >= max_attempts
-    AND (lease_expires_at IS NULL OR lease_expires_at < now());
+  WHERE f.status = 'retrying'
+    AND f.attempt_count >= f.max_attempts
+    AND (f.lease_expires_at IS NULL OR f.lease_expires_at < now());
 
   -- ========================================================================
   -- STEP 3: Claim pending rows with FOR UPDATE SKIP LOCKED
@@ -212,7 +212,8 @@ BEGIN
   WHERE id = p_failure_id
     AND status = 'retrying'
     AND claim_token = p_claim_token
-    AND (lease_expires_at IS NULL OR lease_expires_at >= now());
+    AND lease_expires_at IS NOT NULL
+    AND lease_expires_at >= now();
 
   GET DIAGNOSTICS v_row_count = ROW_COUNT;
 
@@ -223,7 +224,8 @@ BEGIN
         WHEN f.id IS NULL THEN 'not_found'
         WHEN f.status != 'retrying' THEN 'not_retrying:' || f.status
         WHEN f.claim_token IS DISTINCT FROM p_claim_token THEN 'stale_token'
-        WHEN f.lease_expires_at IS NOT NULL AND f.lease_expires_at < now() THEN 'lease_expired'
+        WHEN f.lease_expires_at IS NULL THEN 'null_lease'
+        WHEN f.lease_expires_at < now() THEN 'lease_expired'
         ELSE 'unknown'
       END
     INTO v_result
@@ -241,6 +243,8 @@ BEGIN
         p_failure_id, split_part(v_result, ':', 2);
     ELSIF v_result = 'stale_token' THEN
       RAISE EXCEPTION 'Stale claim token for failure % — reclaimed by another worker', p_failure_id;
+    ELSIF v_result = 'null_lease' THEN
+      RAISE EXCEPTION 'NULL lease for failure % — claim is invalid', p_failure_id;
     ELSIF v_result = 'lease_expired' THEN
       RAISE EXCEPTION 'Lease expired for failure % — claim may have been recovered', p_failure_id;
     ELSE

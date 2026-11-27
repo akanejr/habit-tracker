@@ -302,6 +302,46 @@ const tests = [
     await resetRole();
   }),
 
+  test('report with NULL lease rejected (regression)', async () => {
+    await cleanup();
+    await setServiceRole();
+    const tokenId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+    
+    // Create a retrying record with matching token but NULL lease
+    await sql`
+      INSERT INTO public.operation_failures (user_id, operation_type, payload, error_message,
+        status, auto_retryable, next_retry_at, attempt_count, max_attempts,
+        claim_token, lease_expires_at)
+      VALUES (${TEST_USER_1}, 'start_session', '{}'::jsonb, 'null lease test',
+        'retrying', true, now(), 1, 5,
+        ${tokenId}::uuid, NULL)
+    `;
+    const [f] = await sql`SELECT id, claim_token, status FROM public.operation_failures WHERE error_message = 'null lease test'`;
+    
+    // Verify initial state
+    assert(f.status === 'retrying', 'initial status is retrying');
+    assert(f.claim_token === tokenId, 'token matches');
+
+    // Try to report outcome — should be rejected
+    let errored = false;
+    try {
+      await sql`SELECT public.report_attempt_outcome(${f.id}, ${tokenId}::uuid, true)`;
+    } catch (e) {
+      errored = true;
+      assert(e.message.includes('NULL lease') || e.message.includes('null_lease') || e.message.includes('invalid'),
+        `NULL lease error: ${e.message}`);
+    }
+    assert(errored, 'NULL lease rejected');
+
+    // Verify state unchanged
+    const [after] = await sql`SELECT status, claim_token, lease_expires_at FROM public.operation_failures WHERE id = ${f.id}`;
+    assert(after.status === 'retrying', 'status unchanged after rejection');
+    assert(after.claim_token === tokenId, 'token unchanged after rejection');
+    assert(after.lease_expires_at === null, 'lease still NULL after rejection');
+    
+    await resetRole();
+  }),
+
   test('resolve requires valid claim token', async () => {
     await cleanup();
     await setServiceRole();
@@ -388,14 +428,25 @@ const tests = [
   // GENUINE CONCURRENCY TESTS
   // ========================================================================
 
-  test('CONCURRENCY: Two workers, distinct claims (advisory lock barrier)', async () => {
+  test('CONCURRENCY: Two workers, distinct claims (genuine barrier)', async () => {
     await cleanup();
     await setServiceRole();
+    
+    // Create barrier table for synchronization
+    await sql`
+      CREATE TABLE IF NOT EXISTS test_barrier (
+        worker_id text PRIMARY KEY,
+        ready_at timestamptz DEFAULT now()
+      )
+    `;
+    await sql`DELETE FROM test_barrier`;
+    
+    // Create 5 pending failures
     for (let i = 0; i < 5; i++) {
       await sql`
         INSERT INTO public.operation_failures (user_id, operation_type, payload, error_message,
           status, auto_retryable, next_retry_at, attempt_count, max_attempts)
-        VALUES (${TEST_USER_1}, 'start_session', ${sql.json({ i })}, 'conc ' || ${i}::text,
+      VALUES (${TEST_USER_1}, 'start_session', ${sql.json({ i })}, 'conc ' || ${i}::text,
           'pending', true, now() - interval '1 minute', 0, 5)
       `;
     }
@@ -406,25 +457,37 @@ const tests = [
       await w1.unsafe(`SET ROLE service_role`);
       await w2.unsafe(`SET ROLE service_role`);
 
-      // SYNCHRONIZATION BARRIER: Both workers acquire a shared advisory lock
-      // in sequence, then release it, ensuring they're both alive and about
-      // to call retry_failed_operations() simultaneously.
-      // pg_advisory_xact_lock is transaction-scoped and released on commit.
+      // GENUINE SYNCHRONIZATION BARRIER:
+      // 1. Each worker signals readiness by inserting into barrier table
+      // 2. Each worker polls until BOTH workers have signaled
+      // 3. Only then do both proceed to the claim operation
+      // This guarantees both workers are ready before either claims.
+      
+      const barrierReady = async (conn, workerId) => {
+        // Signal readiness
+        await conn`INSERT INTO test_barrier (worker_id) VALUES (${workerId})`;
+        
+        // Wait for both workers to be ready (poll with 10ms intervals)
+        let count = 0;
+        while (count < 2) {
+          const [result] = await conn`SELECT COUNT(*)::int as count FROM test_barrier`;
+          count = result.count;
+          if (count < 2) {
+            await new Promise(resolve => setTimeout(resolve, 10));
+          }
+        }
+      };
+
+      // Both workers reach the barrier
       await Promise.all([
-        w1`SELECT pg_advisory_lock(99901)`,
-        w2`SELECT pg_advisory_lock(99902)`,
+        barrierReady(w1, 'worker1'),
+        barrierReady(w2, 'worker2'),
       ]);
 
-      // Both workers now begin their claim transactions simultaneously
+      // Both workers are now released simultaneously — execute claims
       const [c1, c2] = await Promise.all([
-        (async () => {
-          await w1`SELECT pg_advisory_unlock(99901)`;
-          return w1`SELECT * FROM public.retry_failed_operations()`;
-        })(),
-        (async () => {
-          await w2`SELECT pg_advisory_unlock(99902)`;
-          return w2`SELECT * FROM public.retry_failed_operations()`;
-        })(),
+        w1`SELECT * FROM public.retry_failed_operations()`,
+        w2`SELECT * FROM public.retry_failed_operations()`,
       ]);
 
       const ids1 = new Set(c1.map(r => r.failure_id));
@@ -442,7 +505,11 @@ const tests = [
       }
       assert(ids1.size + ids2.size <= 5, `total ≤ 5, got ${ids1.size + ids2.size}`);
       assert(ids1.size + ids2.size >= 1, 'at least 1 claimed');
+      console.log(`     Barrier reached: both workers ready`);
       console.log(`     W1: ${ids1.size} claims, W2: ${ids2.size} claims, total: ${ids1.size + ids2.size}`);
+      
+      // Cleanup barrier
+      await sql`DROP TABLE IF EXISTS test_barrier`;
     } finally {
       await w1.end();
       await w2.end();
