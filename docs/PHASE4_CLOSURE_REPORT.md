@@ -16,8 +16,8 @@ Phase 4 addressed timer reliability, session management, recovery from interrupt
 
 | Bug | Location | Issue | Fix |
 |-----|----------|-------|-----|
-| `bloom_quick_log` uses `duration_ms` | `20261125180000_final_corrections.sql` | Quick logs incorrectly stored in `duration_ms` instead of `estimated_ms` | Migration `20261217120000`: Rewrites function to use `estimated_ms` |
-| `bloom_complete_session` missing `completed_on` | `20261125180000_final_corrections.sql` | Session completion didn't set `completed_on` (Africa/Lagos date) | Migration `20261217120000`: Adds `completed_on = public.lagos_date(v_now)` |
+| `bloom_quick_log` uses `duration_ms` | `20261125180000_final_corrections.sql` | Quick logs incorrectly stored in `duration_ms` instead of `estimated_ms` | Migration `20261127120000`: Rewrites function to use `estimated_ms` |
+| `bloom_complete_session` missing `completed_on` | `20261125180000_final_corrections.sql` | Session completion didn't set `completed_on` (Africa/Lagos date) | Migration `20261127120000`: Adds `completed_on = public.lagos_date(v_now)` |
 
 ---
 
@@ -26,7 +26,7 @@ Phase 4 addressed timer reliability, session management, recovery from interrupt
 ### New Files
 | File | Lines | Purpose |
 |------|-------|---------|
-| `supabase/migrations/20261217120000_fix_quick_log_estimated_ms.sql` | 215 | Fixes quick_log and complete_session functions |
+| `supabase/migrations/20261127120000_fix_quick_log_estimated_ms.sql` | 215 | Fixes quick_log and complete_session functions |
 | `tests/phase4-timer-reliability.test.mjs` | 227 | 10 tests: timer accuracy, duplicate prevention, persistence |
 | `tests/phase4-timezone-edge-cases.test.mjs` | 249 | 10 tests: midnight transitions, goal versioning, timezone handling |
 | `tests/phase4-session-recovery.test.mjs` | 257 | 11 tests: idempotency, state consistency, concurrency |
@@ -169,7 +169,7 @@ Total Regression:                     70/70 ✅
 
 ## 7. Migration Details
 
-### `20261217120000_fix_quick_log_estimated_ms.sql`
+### `20261127120000_fix_quick_log_estimated_ms.sql`
 
 **Fix 1: `bloom_quick_log(text, uuid, integer, text)`**
 - Drops incorrect overload that used `duration_ms`
@@ -211,7 +211,7 @@ Both fixes are backward-compatible and idempotent.
 Phase 4 is complete. The following actions require explicit user authorization:
 
 1. **Merge to main:** The branch `bloom/phase-4-timer-sessions-goal-scheduling` is ready for merge review.
-2. **Production deployment:** The migration `20261217120000` needs to be applied to hosted Supabase before Production deployment.
+2. **Production deployment:** The migration `20261127120000` needs to be applied to hosted Supabase before Production deployment.
 3. **Phase 5:** Not started. Requires separate authorization.
 
 ---
